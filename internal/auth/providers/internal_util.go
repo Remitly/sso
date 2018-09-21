@@ -83,3 +83,8 @@ func validateToken(p Provider, accessToken string, header http.Header) bool {
 	logger.WithResponseBody(body).Info("validateToken failed")
 	return false
 }
+
+func updateURL(url *url.URL, hostname string) {
+	url.Scheme = "http"
+	url.Host = hostname
+}
