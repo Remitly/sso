@@ -1,6 +1,8 @@
 package providers
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,19 +18,48 @@ import (
 	"github.com/buzzfeed/sso/internal/pkg/groups"
 	"github.com/buzzfeed/sso/internal/pkg/sessions"
 	"github.com/buzzfeed/sso/internal/pkg/testutil"
+
+	jose "gopkg.in/square/go-jose.v2"
+	"gopkg.in/square/go-jose.v2/jwt"
 )
 
-func newProviderServer(body []byte, code int) (*url.URL, *httptest.Server) {
+const MicrosoftTenantID = "9188040d-6c67-4c5b-b112-36a304b66dad"
+const TestClientID = "a4c35c92-e858-41e8-bd2c-ade04cb622b1"
+
+func newAzureProviderServer(redeemBody *[]byte, redeemCode int, pubKey *rsa.PublicKey) (*url.URL, *httptest.Server) {
+	var u *url.URL
 	s := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
-		rw.WriteHeader(code)
-		rw.Write(body)
+
+		// simple router for the mock IdP server
+		switch r.RequestURI {
+		case "/.well-known/openid-configuration":
+			rw.WriteHeader(200)
+			rw.Write([]byte(fmt.Sprintf(`{
+				"token_endpoint":"%s/oauth2/token",
+				"jwks_uri":"%s/common/discovery/keys",
+				"issuer":"%s"
+			}`, u, u, u)))
+		case "/common/discovery/keys":
+			pub := jose.JSONWebKey{Key: pubKey, Algorithm: "RSA", Use: "sig"}
+			keyData, err := pub.MarshalJSON()
+			if err != nil {
+				panic(err)
+			}
+			rw.WriteHeader(200)
+			rw.Write([]byte(fmt.Sprintf(`{
+				"keys":[%s]
+			}`, keyData)))
+		case "/oauth2/token":
+			rw.WriteHeader(redeemCode)
+			rw.Write(*redeemBody)
+		}
 	}))
-	u, _ := url.Parse(s.URL)
+	u, _ = url.Parse(s.URL)
 	return u, s
 }
 
-func newGoogleProvider(providerData *ProviderData) *GoogleProvider {
+func newAzureV2Provider(providerData *ProviderData) *AzureV2Provider {
 	if providerData == nil {
 		providerData = &ProviderData{
 			ProviderName: "",
@@ -39,11 +70,10 @@ func newGoogleProvider(providerData *ProviderData) *GoogleProvider {
 			ValidateURL:  &url.URL{},
 			Scope:        ""}
 	}
-	provider, _ := NewGoogleProvider(providerData, "", "")
-	return provider
+	return NewAzureV2Provider(providerData)
 }
 
-func TestGoogleProviderDefaults(t *testing.T) {
+func TestAzureV2ProviderDefaults(t *testing.T) {
 	expectedResults := []struct {
 		name         string
 		providerData *ProviderData
@@ -56,11 +86,12 @@ func TestGoogleProviderDefaults(t *testing.T) {
 	}{
 		{
 			name:        "defaults",
-			signInURL:   "https://accounts.google.com/o/oauth2/auth?access_type=offline",
-			redeemURL:   "https://www.googleapis.com/oauth2/v3/token",
-			revokeURL:   "https://accounts.google.com/o/oauth2/revoke",
-			validateURL: "https://www.googleapis.com/oauth2/v3/tokeninfo",
-			scope:       "profile email",
+			signInURL:   "https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/oauth2/v2.0/authorize",
+			redeemURL:   "https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/oauth2/v2.0/token",
+			profileURL:  "https://graph.microsoft.com/oidc/userinfo",
+			revokeURL:   "", // does not exist
+			validateURL: "", // does not exist
+			scope:       "openid email profile offline_access",
 		},
 		{
 			name: "with provider overrides",
@@ -96,12 +127,16 @@ func TestGoogleProviderDefaults(t *testing.T) {
 	}
 	for _, expected := range expectedResults {
 		t.Run(expected.name, func(t *testing.T) {
-			p := newGoogleProvider(expected.providerData)
-			if p == nil {
-				t.Errorf("google provider was nil")
+			p := newAzureV2Provider(expected.providerData)
+			err := p.Configure(MicrosoftTenantID)
+			if err != nil {
+				t.Error(err)
 			}
-			if p.Data().ProviderName != "Google" {
-				t.Errorf("expected provider name Google, got %s", p.Data().ProviderName)
+			if p == nil {
+				t.Errorf("azure provider was nil")
+			}
+			if p.Data().ProviderName != "Azure AD" {
+				t.Errorf("expected provider name Azure AD, got %s", p.Data().ProviderName)
 			}
 			if p.Data().SignInURL.String() != expected.signInURL {
 				log.Printf("expected %s", expected.signInURL)
@@ -143,27 +178,53 @@ func TestGoogleProviderDefaults(t *testing.T) {
 	}
 }
 
-type redeemResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int64  `json:"expires_in"`
-	IDToken      string `json:"id_token"`
+// claims represents public claim values (as specified in RFC 7519).
+type claims struct {
+	Issuer   string          `json:"iss,omitempty"`
+	Audience string          `json:"aud,omitempty"`
+	Expiry   jwt.NumericDate `json:"exp,omitempty"`
+	Name     string          `json:"name,omitempty"`
+	Email    string          `json:"email,omitempty"`
+	NotEmail string          `json:"not_email,omitempty"`
 }
 
-func TestGoogleProviderRedeem(t *testing.T) {
+func TestAzureV2ProviderRedeem(t *testing.T) {
+	// For testing create the RSA key pair in the code
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Error(err)
+	}
+	// create Square.jose signing key
+	key := jose.SigningKey{Algorithm: jose.RS256, Key: privKey}
+
+	// create a Square.jose RSA signer, used to sign the JWT
+	var signerOpts = jose.SignerOptions{}
+	signerOpts.WithType("JWT")
+	rsaSigner, err := jose.NewSigner(key, &signerOpts)
+	if err != nil {
+		t.Error(err)
+	}
+
 	testCases := []struct {
 		name            string
+		claims          *claims
 		resp            redeemResponse
 		expectedError   bool
 		expectedSession *sessions.SessionState
 	}{
 		{
 			name: "redeem",
+			claims: &claims{
+				Issuer:   "{mock-issuer}",
+				Audience: TestClientID,
+				Expiry:   jwt.NewNumericDate(time.Now().Add(10 * time.Second)),
+				Name:     "Michael Bland",
+				Email:    "michael.bland@gsa.gov",
+			},
 			resp: redeemResponse{
 				AccessToken:  "a1234",
 				ExpiresIn:    10,
 				RefreshToken: "refresh12345",
-				IDToken:      "ignored prefix." + base64.URLEncoding.EncodeToString([]byte(`{"email": "michael.bland@gsa.gov", "email_verified":true}`)),
 			},
 			expectedSession: &sessions.SessionState{
 				Email:        "michael.bland@gsa.gov",
@@ -172,10 +233,41 @@ func TestGoogleProviderRedeem(t *testing.T) {
 			},
 		},
 		{
+			name: "missing issuer",
+			claims: &claims{
+				Audience: TestClientID,
+				Expiry:   jwt.NewNumericDate(time.Now().Add(10 * time.Second)),
+				Name:     "Michael Bland",
+				Email:    "michael.bland@gsa.gov",
+			},
+			resp: redeemResponse{
+				AccessToken:  "a1234",
+				ExpiresIn:    10,
+				RefreshToken: "refresh12345",
+			},
+			expectedError: true,
+		},
+		{
+			name: "invalid issuer",
+			claims: &claims{
+				Issuer:   "https://example.com/bogus/issuer",
+				Audience: TestClientID,
+				Expiry:   jwt.NewNumericDate(time.Now().Add(10 * time.Second)),
+				Name:     "Michael Bland",
+				Email:    "michael.bland@gsa.gov",
+			},
+			resp: redeemResponse{
+				AccessToken:  "a1234",
+				ExpiresIn:    10,
+				RefreshToken: "refresh12345",
+			},
+			expectedError: true,
+		},
+		{
 			name: "invalid encoding",
 			resp: redeemResponse{
 				AccessToken: "a1234",
-				IDToken:     "ignored prefix." + `{"email": "michael.bland@gsa.gov"}`,
+				IDToken:     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + `{"name": "Michael Bland","email": "michael.bland@gsa.gov"}` + ".SC_eJ3K04rLOPLLDIWEKwr0DPZqw5KlFySybzmxfM6Y",
 			},
 			expectedError: true,
 		},
@@ -183,15 +275,17 @@ func TestGoogleProviderRedeem(t *testing.T) {
 			name: "invalid json",
 			resp: redeemResponse{
 				AccessToken: "a1234",
-				IDToken:     "ignored prefix." + base64.URLEncoding.EncodeToString([]byte(`{"email": michael.bland@gsa.gov}`)),
+				IDToken:     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + base64.URLEncoding.EncodeToString([]byte(`{"email": michael.bland@gsa.gov}`)) + ".SC_eJ3K04rLOPLLDIWEKwr0DPZqw5KlFySybzmxfM6Y",
 			},
 			expectedError: true,
 		},
 		{
 			name: "missing email",
+			claims: &claims{
+				NotEmail: "missing",
+			},
 			resp: redeemResponse{
 				AccessToken: "a1234",
-				IDToken:     "ignored prefix." + base64.URLEncoding.EncodeToString([]byte(`{"not_email": "missing"}`)),
 			},
 			expectedError: true,
 		},
@@ -199,12 +293,41 @@ func TestGoogleProviderRedeem(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := newGoogleProvider(nil)
-			body, err := json.Marshal(tc.resp)
-			testutil.Equal(t, nil, err)
+			var body []byte
 			var server *httptest.Server
-			p.RedeemURL, server = newProviderServer(body, http.StatusOK)
+			// pointer to body to bypass chicken/egg issue w/ mock server urls
+			providerURL, server := newAzureProviderServer(&body, http.StatusOK, &privKey.PublicKey)
 			defer server.Close()
+			azureOIDCConfigURL = providerURL.String()
+
+			if tc.claims != nil {
+				// create an instance of Builder that uses the rsa signer
+				builder := jwt.Signed(rsaSigner)
+
+				// add claims to the Builder
+				tc.claims.Issuer = strings.Replace(tc.claims.Issuer, "{mock-issuer}", providerURL.String(), -1)
+				builder = builder.Claims(tc.claims)
+
+				// build and inject ID token into response
+				idToken, err := builder.CompactSerialize()
+				if err != nil {
+					t.Error(err)
+				}
+				tc.resp.IDToken = idToken
+			}
+
+			body, err = json.Marshal(tc.resp)
+			testutil.Equal(t, nil, err)
+
+			p := newAzureV2Provider(nil)
+			p.ClientID = TestClientID
+			p.ClientSecret = "456"
+			err = p.Configure(MicrosoftTenantID)
+			if err != nil {
+				t.Error(err)
+			}
+			// graph service mock has to be set after p.Configure
+			p.GraphService = &MockAzureGraphService{}
 
 			session, err := p.Redeem("http://redirect/", "code1234")
 			if tc.expectedError && err == nil {
@@ -239,80 +362,14 @@ func TestGoogleProviderRedeem(t *testing.T) {
 	}
 }
 
-type revokeErrorResponse struct {
-	Error            string `json:"error"`
-	ErrorDescription string `json:"error_description"`
+type groupsClientMock struct {
 }
 
-func TestGoogleProviderRevoke(t *testing.T) {
-	testCases := []struct {
-		name                string
-		resp                revokeErrorResponse
-		httpStatus          int
-		sessionState        *sessions.SessionState
-		expectedError       bool
-		expectedErrorString string
-	}{
-		{
-			name: "idempotent revoke",
-			resp: revokeErrorResponse{
-				Error:            "invalid_token",
-				ErrorDescription: "Token expired or revoked",
-			},
-			sessionState: &sessions.SessionState{
-				AccessToken:     "access1234",
-				RefreshDeadline: time.Now(),
-				RefreshToken:    "refresh1234",
-				Email:           "logged.out@example.com",
-			},
-			httpStatus: http.StatusBadRequest,
-		},
-		{
-			name: "can still fail",
-			resp: revokeErrorResponse{
-				Error:            "not_invalid_token",
-				ErrorDescription: "Something else happened internally",
-			},
-			sessionState: &sessions.SessionState{
-				AccessToken:     "access1234",
-				RefreshDeadline: time.Now(),
-				RefreshToken:    "refresh1234",
-				Email:           "logged.out@example.com",
-			},
-			httpStatus:          http.StatusForbidden,
-			expectedErrorString: "SERVICE_UNAVAILABLE",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := newGoogleProvider(nil)
-			body, err := json.Marshal(tc.resp)
-			testutil.Equal(t, nil, err)
-
-			var server *httptest.Server
-			p.RevokeURL, server = newProviderServer(body, tc.httpStatus)
-			defer server.Close()
-			err = p.Revoke(tc.sessionState)
-			if tc.expectedError && err != nil {
-				t.Errorf("unexpected error %s", err)
-			}
-			if tc.expectedError {
-				if err == nil {
-					t.Errorf("expected error but err was nil")
-				}
-				if !strings.Contains(err.Error(), tc.expectedErrorString) {
-					log.Printf("expected error string to contain %s", tc.expectedErrorString)
-					log.Printf("got %s", err)
-					t.Errorf("unexpected error string")
-				}
-			}
-		})
-
-	}
+func (c *groupsClientMock) Do(req *http.Request) (*http.Response, error) {
+	return &http.Response{}, nil
 }
 
-func TestGoogleValidateGroupMembers(t *testing.T) {
+func TestAzureV2ValidateGroupMembers(t *testing.T) {
 	testCases := []struct {
 		name                string
 		inputAllowedGroups  []string
@@ -398,10 +455,8 @@ func TestGoogleValidateGroupMembers(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := GoogleProvider{
-				AdminService: &MockAdminService{Groups: tc.groups, GroupsError: tc.groupsError},
-				GroupsCache:  &groups.MockCache{GetMembersFunc: tc.getMembersFunc, Refreshed: true},
-			}
+			p := newAzureV2Provider(nil)
+			p.GraphService = &MockAzureGraphService{Groups: tc.groups, GroupsError: tc.groupsError}
 
 			groups, err := p.ValidateGroupMembership("email", tc.inputAllowedGroups)
 
