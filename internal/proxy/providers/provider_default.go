@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	log "github.com/buzzfeed/sso/internal/pkg/logging"
 )
 
 // Redeem takes a redirectURL and code, creates some params and redeems the request
@@ -127,6 +129,8 @@ func (p *ProviderData) GetEmailAddress(s *SessionState) (string, error) {
 
 // ValidateGroup validates that the provided email exists in the configured provider email group(s).
 func (p *ProviderData) ValidateGroup(_ string, _ []string) ([]string, bool, error) {
+	logger := log.NewLogEntry()
+	logger.Info("called default provider ValidateGroup")
 	return []string{}, true, nil
 }
 
