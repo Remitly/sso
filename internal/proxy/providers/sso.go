@@ -162,9 +162,11 @@ func (p *SSOProvider) Redeem(redirectURL, code string) (*SessionState, error) {
 // an authorized group.
 func (p *SSOProvider) ValidateGroup(email string, allowedGroups []string) ([]string, bool, error) {
 	logger := log.NewLogEntry()
+	logger.Info("called sso.go ValidateGroup")
 
 	logger.WithUser(email).WithAllowedGroups(allowedGroups).Info("validating groups")
 	inGroups := []string{}
+	logger.Printf("allowedGroups: %v", allowedGroups)
 	if len(allowedGroups) == 0 {
 		return inGroups, true, nil
 	}

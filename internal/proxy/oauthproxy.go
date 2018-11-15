@@ -313,6 +313,10 @@ func NewOAuthProxy(opts *Options, optFuncs ...func(*OAuthProxy) error) (*OAuthPr
 	}
 
 	for _, upstreamConfig := range opts.upstreamConfigs {
+		logger.Printf("upstreamConfig.Route: %v", upstreamConfig.Route)
+		logger.Printf("upstreamConfig.RouteConfig: %v", upstreamConfig.RouteConfig)
+		logger.Printf("upstreamConfig.RouteConfig.Options: %v", upstreamConfig.RouteConfig.Options)
+
 		switch route := upstreamConfig.Route.(type) {
 		case *SimpleRoute:
 			reverseProxy := NewReverseProxy(route.ToURL, upstreamConfig)
@@ -514,6 +518,8 @@ func (p *OAuthProxy) LoadCookiedSession(req *http.Request) (*providers.SessionSt
 		return nil, ErrInvalidSession
 	}
 
+	logger.Printf("session loaded: %v", session)
+
 	return session, nil
 }
 
@@ -525,6 +531,9 @@ func (p *OAuthProxy) SaveSession(rw http.ResponseWriter, req *http.Request, s *p
 	}
 
 	p.SetSessionCookie(rw, req, value)
+	logger := log.NewLogEntry().WithRemoteAddress(getRemoteAddr(req))
+	logger.Printf("session saved: %v", s)
+
 	return nil
 }
 
@@ -828,6 +837,12 @@ func (p *OAuthProxy) OAuthCallback(rw http.ResponseWriter, req *http.Request) {
 	allowedGroups := route.upstreamConfig.AllowedGroups
 
 	inGroups, validGroup, err := p.provider.ValidateGroup(session.Email, allowedGroups)
+	logger.Printf("route: %v", route)
+	logger.Printf("route.upstreamConfig: %v", route.upstreamConfig)
+	logger.Printf("inGroups: %v", inGroups)
+	logger.Printf("allowedGroups: %v", allowedGroups)
+	logger.Printf("validGroup: %v", validGroup)
+	logger.Printf("err: %v", err)
 	if err != nil {
 		tags = append(tags, "error:user_group_failed")
 		p.StatsdClient.Incr("provider_error", tags, 1.0)
@@ -1035,6 +1050,9 @@ func (p *OAuthProxy) Authenticate(rw http.ResponseWriter, req *http.Request) (er
 		logger.WithUser(session.Email).Error("not authorized")
 		return ErrUserNotAuthorized
 	}
+
+	logger.Printf("proxied full session: %v", session)
+	logger.Printf("proxied groups: %v", session.Groups)
 
 	req.Header.Set("X-Forwarded-User", session.User)
 	req.Header.Set("X-Forwarded-Email", session.Email)
