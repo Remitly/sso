@@ -518,8 +518,6 @@ func (p *OAuthProxy) LoadCookiedSession(req *http.Request) (*providers.SessionSt
 		return nil, ErrInvalidSession
 	}
 
-	logger.Printf("session loaded: %v", session)
-
 	return session, nil
 }
 
