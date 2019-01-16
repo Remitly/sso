@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/18F/hmacauth"
 	"github.com/imdario/mergo"
 	"gopkg.in/yaml.v2"
 )
@@ -47,10 +48,13 @@ type UpstreamConfig struct {
 	ExtraRoutes []*RouteConfig `yaml:"extra_routes"`
 
 	// Generated at Parse Time
-	Route           interface{} // note: :/
-	Timeout         time.Duration
-	FlushInterval   time.Duration
-	HeaderOverrides map[string]string
+	Route              interface{} // note: :/
+	HMACAuth           hmacauth.HmacAuth
+	Timeout            time.Duration
+	FlushInterval      time.Duration
+	HeaderOverrides    map[string]string
+	TLSSkipVerify      bool
+	SkipRequestSigning bool
 }
 
 // RouteConfig maps to the yaml config fields,
@@ -71,9 +75,10 @@ type RouteConfig struct {
 // * timeout - duration before timing out request.
 // * flush_interval - interval at which the proxy should flush data to the browser
 type OptionsConfig struct {
-	HeaderOverrides map[string]string `yaml:"header_overrides"`
-	Timeout         time.Duration     `yaml:"timeout"`
-	FlushInterval   time.Duration     `yaml:"flush_interval"`
+	HeaderOverrides    map[string]string `yaml:"header_overrides"`
+	Timeout            time.Duration     `yaml:"timeout"`
+	FlushInterval      time.Duration     `yaml:"flush_interval"`
+	SkipRequestSigning bool              `yaml:"skip_request_signing"`
 }
 
 // ErrParsingConfig is an error specific to config parsing.
@@ -102,7 +107,7 @@ func loadServiceConfigs(raw []byte, cluster, scheme string, configVars map[strin
 	// we don't set this to the len(serviceConfig) since not all service configs
 	// are configured for all clusters, leaving nil tail pointers in the slice.
 	configs := make([]*UpstreamConfig, 0)
-	// resovle overrides
+	// resolve overrides
 	for _, service := range serviceConfigs {
 		proxy, err := resolveUpstreamConfig(service, cluster)
 		if err != nil {
@@ -172,6 +177,23 @@ func loadServiceConfigs(raw []byte, cluster, scheme string, configVars map[strin
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	for _, proxy := range configs {
+		key := fmt.Sprintf("%s_signing_key", proxy.Service)
+		signingKey, ok := configVars[key]
+		if !ok {
+			continue
+		}
+		auth, err := generateHmacAuth(signingKey)
+		if err != nil {
+			return nil, &ErrParsingConfig{
+				Message: fmt.Sprintf("unable to generate hmac auth for %s", proxy.Service),
+				Err:     err,
+			}
+		}
+		proxy.HMACAuth = auth
+
 	}
 
 	return configs, nil
@@ -325,7 +347,7 @@ func parseOptionsConfig(proxy *UpstreamConfig) error {
 	proxy.Timeout = proxy.RouteConfig.Options.Timeout
 	proxy.FlushInterval = proxy.RouteConfig.Options.FlushInterval
 	proxy.HeaderOverrides = proxy.RouteConfig.Options.HeaderOverrides
-
+	proxy.SkipRequestSigning = proxy.RouteConfig.Options.SkipRequestSigning
 	proxy.RouteConfig.Options = nil
 
 	return nil

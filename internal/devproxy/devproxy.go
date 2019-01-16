@@ -1,10 +1,12 @@
 package devproxy
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -12,11 +14,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/18F/hmacauth"
 	log "github.com/buzzfeed/sso/internal/pkg/logging"
 )
 
-// SignatureHeader is the header name where the signed request header is stored.
-const SignatureHeader = "Gap-Signature"
+// HMACSignatureHeader is the header name where the signed request header is stored.
+const HMACSignatureHeader = "Gap-Signature"
 
 // SignatureHeaders are the headers that are valid in the request.
 var SignatureHeaders = []string{
@@ -35,6 +38,8 @@ type DevProxy struct {
 	templates         *template.Template
 	mux               map[string]*route
 	regexRoutes       []*route
+	requestSigner     *RequestSigner
+	publicCertsJSON   []byte
 }
 
 type route struct {
@@ -54,13 +59,16 @@ type StateParameter struct {
 
 // UpstreamProxy stores information necessary for proxying the request back to the upstream.
 type UpstreamProxy struct {
-	name    string
-	handler http.Handler
+	name          string
+	handler       http.Handler
+	requestSigner *RequestSigner
 }
 
 // upstreamTransport is used to ensure that upstreams cannot override the
 // security headers applied by dev_proxy
-type upstreamTransport struct{}
+type upstreamTransport struct {
+	transport *http.Transport
+}
 
 // RoundTrip round trips the request and deletes security headers before returning the response.
 func (t *upstreamTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -76,8 +84,29 @@ func (t *upstreamTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return resp, err
 }
 
+func newUpstreamTransport(insecureSkipVerify bool) *upstreamTransport {
+	return &upstreamTransport{
+		transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+				DualStack: true,
+			}).DialContext,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			TLSClientConfig:       &tls.Config{InsecureSkipVerify: insecureSkipVerify},
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+}
+
 // ServeHTTP calls the upstream's ServeHTTP function.
 func (u *UpstreamProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if u.requestSigner != nil {
+		u.requestSigner.Sign(r)
+	}
 
 	start := time.Now()
 	u.handler.ServeHTTP(w, r)
@@ -100,7 +129,7 @@ func singleJoiningSlash(a, b string) string {
 
 // NewReverseProxy creates a reverse proxy to a specified url.
 // It adds an X-Forwarded-Host header that is the request's host.
-func NewReverseProxy(to *url.URL) *httputil.ReverseProxy {
+func NewReverseProxy(to *url.URL, config *UpstreamConfig) *httputil.ReverseProxy {
 	targetQuery := to.RawQuery
 	director := func(req *http.Request) {
 		req.URL.Scheme = to.Scheme
@@ -118,7 +147,7 @@ func NewReverseProxy(to *url.URL) *httputil.ReverseProxy {
 		}
 	}
 	proxy := &httputil.ReverseProxy{Director: director}
-	proxy.Transport = &upstreamTransport{}
+	proxy.Transport = newUpstreamTransport(config.TLSSkipVerify)
 	dir := proxy.Director
 
 	proxy.Director = func(req *http.Request) {
@@ -136,9 +165,9 @@ func NewReverseProxy(to *url.URL) *httputil.ReverseProxy {
 // NewRewriteReverseProxy creates a reverse proxy that is capable of creating upstream
 // urls on the fly based on a from regex and a templated to field.
 // It adds an X-Forwarded-Host header to the the upstream's request.
-func NewRewriteReverseProxy(route *RewriteRoute) *httputil.ReverseProxy {
+func NewRewriteReverseProxy(route *RewriteRoute, config *UpstreamConfig) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{}
-	proxy.Transport = &upstreamTransport{}
+	proxy.Transport = newUpstreamTransport(config.TLSSkipVerify)
 	proxy.Director = func(req *http.Request) {
 		// we do this to rewrite requests
 		rewritten := route.FromRegex.ReplaceAllString(req.Host, route.ToTemplate.Opaque)
@@ -167,11 +196,16 @@ func NewRewriteReverseProxy(route *RewriteRoute) *httputil.ReverseProxy {
 }
 
 // NewReverseProxyHandler creates a new http.Handler given a httputil.ReverseProxy
-func NewReverseProxyHandler(reverseProxy *httputil.ReverseProxy, opts *Options, config *UpstreamConfig) (http.Handler, []string) {
+func NewReverseProxyHandler(reverseProxy *httputil.ReverseProxy, opts *Options, config *UpstreamConfig, signer *RequestSigner) (http.Handler, []string) {
 	upstreamProxy := &UpstreamProxy{
-		name:    config.Service,
-		handler: reverseProxy,
+		name:          config.Service,
+		handler:       reverseProxy,
+		requestSigner: signer,
 	}
+	if config.SkipRequestSigning {
+		upstreamProxy.requestSigner = nil
+	}
+
 	if config.FlushInterval != 0 {
 		return NewStreamingHandler(upstreamProxy, opts, config), []string{"handler:streaming"}
 	}
@@ -197,19 +231,56 @@ func NewStreamingHandler(handler http.Handler, opts *Options, config *UpstreamCo
 	return upstreamProxy
 }
 
+func generateHmacAuth(signatureKey string) (hmacauth.HmacAuth, error) {
+	components := strings.Split(signatureKey, ":")
+	if len(components) != 2 {
+		return nil, fmt.Errorf("invalid signature hash:key spec")
+	}
+
+	algorithm, secret := components[0], components[1]
+	hash, err := hmacauth.DigestNameToCryptoHash(algorithm)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported signature hash algorithm: %s", algorithm)
+	}
+	auth := hmacauth.NewHmacAuth(hash, []byte(secret), HMACSignatureHeader, SignatureHeaders)
+	return auth, nil
+}
+
 // NewDevProxy creates a new DevProxy struct.
 func NewDevProxy(opts *Options, optFuncs ...func(*DevProxy) error) (*DevProxy, error) {
 	logger := log.NewLogEntry()
 	logger.Info("NewDevProxy...")
+
+	// Configure the RequestSigner (used to sign requests with `Sso-Signature` header).
+	// Also build the `certs` static JSON-string which will be served from a public endpoint.
+	// The key published at this endpoint allows upstreams to decrypt the `Sso-Signature`
+	// header, and validate the integrity and authenticity of a request.
+	certs := make(map[string]string)
+	var requestSigner *RequestSigner
+	if len(opts.RequestSigningKey) > 0 {
+		requestSigner, err := NewRequestSigner(opts.RequestSigningKey)
+		if err != nil {
+			return nil, fmt.Errorf("could not build RequestSigner: %s", err)
+		}
+		id, key := requestSigner.PublicKey()
+		certs[id] = key
+	} else {
+		logger.Warn("Running DevProxy without signing key. Requests will not be signed.")
+	}
+	certsAsStr, err := json.MarshalIndent(certs, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("could not marshal public certs as JSON: %s", err)
+	}
 
 	p := &DevProxy{
 		// these fields make up the routing mechanism
 		mux:         make(map[string]*route),
 		regexRoutes: make([]*route, 0),
 
-		redirectURL: &url.URL{Path: "/oauth2/callback"},
-		// skipAuthPreflight: opts.SkipAuthPreflight,
-		templates: getTemplates(),
+		redirectURL:     &url.URL{Path: "/oauth2/callback"},
+		templates:       getTemplates(),
+		requestSigner:   requestSigner,
+		publicCertsJSON: certsAsStr,
 	}
 
 	for _, optFunc := range optFuncs {
@@ -222,12 +293,12 @@ func NewDevProxy(opts *Options, optFuncs ...func(*DevProxy) error) (*DevProxy, e
 	for _, upstreamConfig := range opts.upstreamConfigs {
 		switch route := upstreamConfig.Route.(type) {
 		case *SimpleRoute:
-			reverseProxy := NewReverseProxy(route.ToURL)
-			handler, tags := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig)
+			reverseProxy := NewReverseProxy(route.ToURL, upstreamConfig)
+			handler, tags := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, requestSigner)
 			p.Handle(route.FromURL.Host, handler, tags, upstreamConfig)
 		case *RewriteRoute:
-			reverseProxy := NewRewriteReverseProxy(route)
-			handler, tags := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig)
+			reverseProxy := NewRewriteReverseProxy(route, upstreamConfig)
+			handler, tags := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, requestSigner)
 			p.HandleRegex(route.FromRegex, handler, tags, upstreamConfig)
 		default:
 			return nil, fmt.Errorf("unkown route type")
@@ -242,7 +313,7 @@ func (p *DevProxy) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/favicon.ico", p.Favicon)
 	mux.HandleFunc("/robots.txt", p.RobotsTxt)
-	// mux.HandleFunc("/oauth2/callback", p.DevCallback)
+	mux.HandleFunc("/oauth2/v1/certs", p.Certs)
 	mux.HandleFunc("/", p.Proxy)
 
 	// Global middleware, which will be applied to each request in reverse
@@ -369,4 +440,10 @@ func (p *DevProxy) router(req *http.Request) (*route, bool) {
 	}
 
 	return nil, false
+}
+
+// Certs publishes the public key necessary for upstream services to validate the digital signature
+// used to sign each request.
+func (p *DevProxy) Certs(rw http.ResponseWriter, _ *http.Request) {
+	rw.Write(p.publicCertsJSON)
 }

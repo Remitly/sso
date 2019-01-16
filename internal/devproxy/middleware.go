@@ -6,8 +6,6 @@ import (
 )
 
 // With inspiration from https://github.com/unrolled/secure
-//
-// TODO: Add Content-Security-Report header?
 var securityHeaders = map[string]string{
 	"X-Content-Type-Options": "nosniff",
 	"X-Frame-Options":        "SAMEORIGIN",

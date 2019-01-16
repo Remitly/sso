@@ -33,6 +33,8 @@ type Options struct {
 
 	RequestLogging bool `envconfig:"REQUEST_LOGGING" default:"true"`
 
+	RequestSigningKey string `envconfig:"REQUEST_SIGNATURE_KEY"`
+
 	// This is an override for supplying template vars at test time
 	testTemplateVars map[string]string
 

@@ -1,6 +1,8 @@
 package devproxy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,7 +45,7 @@ func TestNewReverseProxy(t *testing.T) {
 	backendHost := net.JoinHostPort(backendHostname, backendPort)
 	proxyURL, _ := url.Parse(backendURL.Scheme + "://" + backendHost + "/")
 
-	proxyHandler := NewReverseProxy(proxyURL)
+	proxyHandler := NewReverseProxy(proxyURL, &UpstreamConfig{TLSSkipVerify: false})
 	frontend := httptest.NewServer(proxyHandler)
 	defer frontend.Close()
 
@@ -75,7 +77,7 @@ func TestNewRewriteReverseProxy(t *testing.T) {
 		},
 	}
 
-	rewriteProxy := NewRewriteReverseProxy(route)
+	rewriteProxy := NewRewriteReverseProxy(route, &UpstreamConfig{TLSSkipVerify: false})
 
 	frontend := httptest.NewServer(rewriteProxy)
 	defer frontend.Close()
@@ -130,7 +132,7 @@ func TestNewReverseProxyHostname(t *testing.T) {
 		t.Fatalf("expected to parse to url: %s", err)
 	}
 
-	reverseProxy := NewReverseProxy(toURL)
+	reverseProxy := NewReverseProxy(toURL, &UpstreamConfig{TLSSkipVerify: false})
 	from := httptest.NewServer(reverseProxy)
 	defer from.Close()
 
@@ -249,6 +251,41 @@ func TestRobotsTxt(t *testing.T) {
 	proxy.Handler().ServeHTTP(rw, req)
 	testutil.Equal(t, 200, rw.Code)
 	testutil.Equal(t, "User-agent: *\nDisallow: /", rw.Body.String())
+}
+
+func TestCerts(t *testing.T) {
+	opts := NewOptions()
+	opts.upstreamConfigs = generateTestUpstreamConfigs("foo-internal.sso.dev")
+
+	requestSigningKey, err := ioutil.ReadFile("testdata/private_key.pem")
+	testutil.Assert(t, err == nil, "could not read private key from testdata: %s", err)
+	opts.RequestSigningKey = string(requestSigningKey)
+	opts.Validate()
+
+	expectedPublicKey, err := ioutil.ReadFile("testdata/public_key.pub")
+	testutil.Assert(t, err == nil, "could not read public key from testdata: %s", err)
+
+	var keyHash []byte
+	hasher := sha256.New()
+	_, _ = hasher.Write(expectedPublicKey)
+	keyHash = hasher.Sum(keyHash)
+
+	proxy, err := NewDevProxy(opts)
+	if err != nil {
+		t.Errorf("unexpected error %s", err)
+		return
+	}
+	rw := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "https://foo.sso.dev/oauth2/v1/certs", nil)
+	proxy.Handler().ServeHTTP(rw, req)
+	testutil.Equal(t, 200, rw.Code)
+
+	var certs map[string]string
+	if err := json.Unmarshal([]byte(rw.Body.String()), &certs); err != nil {
+		t.Errorf("failed to unmarshal certs from json response: %s", err)
+		return
+	}
+	testutil.Equal(t, string(expectedPublicKey), certs[hex.EncodeToString(keyHash)])
 }
 
 func TestFavicon(t *testing.T) {

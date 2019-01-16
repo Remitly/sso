@@ -19,7 +19,6 @@ type responseLogger struct {
 	w      http.ResponseWriter
 	status int
 	size   int
-	// authInfo string
 }
 
 func (l *responseLogger) Header() http.Header {
@@ -31,14 +30,13 @@ func (l *responseLogger) Write(b []byte) (int, error) {
 		// The status will be StatusOK if WriteHeader has not been called yet
 		l.status = http.StatusOK
 	}
-	// l.extractUser()
+
 	size, err := l.w.Write(b)
 	l.size += size
 	return size, err
 }
 
 func (l *responseLogger) WriteHeader(s int) {
-	// l.extractUser()
 	l.w.WriteHeader(s)
 	l.status = s
 }
