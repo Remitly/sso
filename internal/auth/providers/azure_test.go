@@ -22,8 +22,11 @@ import (
 	"gopkg.in/square/go-jose.v2/jwt"
 )
 
-const MicrosoftTenantID = "9188040d-6c67-4c5b-b112-36a304b66dad"
-const TestClientID = "a4c35c92-e858-41e8-bd2c-ade04cb622b1"
+const (
+	microsoftTenantID = "9188040d-6c67-4c5b-b112-36a304b66dad"
+	testClientID      = "a4c35c92-e858-41e8-bd2c-ade04cb622b1"
+	testClientSecret  = "4" // number chosen at random
+)
 
 func newAzureProviderServer(redeemBody *[]byte, redeemCode int, pubKey *rsa.PublicKey) (*url.URL, *httptest.Server) {
 	var u *url.URL
@@ -62,6 +65,8 @@ func newAzureV2Provider(providerData *ProviderData) *AzureV2Provider {
 	if providerData == nil {
 		providerData = &ProviderData{
 			ProviderName: "",
+			ClientID:     testClientID,
+			ClientSecret: testClientSecret,
 			SignInURL:    &url.URL{},
 			RedeemURL:    &url.URL{},
 			RevokeURL:    &url.URL{},
@@ -69,7 +74,11 @@ func newAzureV2Provider(providerData *ProviderData) *AzureV2Provider {
 			ValidateURL:  &url.URL{},
 			Scope:        ""}
 	}
-	return NewAzureV2Provider(providerData)
+	provider, err := NewAzureV2Provider(providerData)
+	if err != nil {
+		panic(err)
+	}
+	return provider
 }
 
 func TestAzureV2ProviderDefaults(t *testing.T) {
@@ -95,6 +104,8 @@ func TestAzureV2ProviderDefaults(t *testing.T) {
 		{
 			name: "with provider overrides",
 			providerData: &ProviderData{
+				ClientID:     "1234",
+				ClientSecret: "4", // Number chosen at random
 				SignInURL: &url.URL{
 					Scheme: "https",
 					Host:   "example.com",
@@ -115,7 +126,8 @@ func TestAzureV2ProviderDefaults(t *testing.T) {
 					Scheme: "https",
 					Host:   "example.com",
 					Path:   "/oauth/tokeninfo"},
-				Scope: "profile"},
+				Scope: "profile",
+			},
 			signInURL:   "https://example.com/oauth/auth",
 			redeemURL:   "https://example.com/oauth/token",
 			revokeURL:   "https://example.com/oauth/deauth",
@@ -127,7 +139,7 @@ func TestAzureV2ProviderDefaults(t *testing.T) {
 	for _, expected := range expectedResults {
 		t.Run(expected.name, func(t *testing.T) {
 			p := newAzureV2Provider(expected.providerData)
-			err := p.Configure(MicrosoftTenantID)
+			err := p.Configure(microsoftTenantID)
 			if err != nil {
 				t.Error(err)
 			}
@@ -184,6 +196,7 @@ type claims struct {
 	Expiry   jwt.NumericDate `json:"exp,omitempty"`
 	Name     string          `json:"name,omitempty"`
 	Email    string          `json:"email,omitempty"`
+	Nonce    string          `json:"nonce,omitempty"`
 	NotEmail string          `json:"not_email,omitempty"`
 }
 
@@ -215,10 +228,11 @@ func TestAzureV2ProviderRedeem(t *testing.T) {
 			name: "redeem",
 			claims: &claims{
 				Issuer:   "{mock-issuer}",
-				Audience: TestClientID,
+				Audience: testClientID,
 				Expiry:   jwt.NewNumericDate(time.Now().Add(10 * time.Second)),
 				Name:     "Michael Bland",
 				Email:    "michael.bland@gsa.gov",
+				Nonce:    "{mock-nonce}",
 			},
 			resp: redeemResponse{
 				AccessToken:  "a1234",
@@ -234,10 +248,11 @@ func TestAzureV2ProviderRedeem(t *testing.T) {
 		{
 			name: "missing issuer",
 			claims: &claims{
-				Audience: TestClientID,
+				Audience: testClientID,
 				Expiry:   jwt.NewNumericDate(time.Now().Add(10 * time.Second)),
 				Name:     "Michael Bland",
 				Email:    "michael.bland@gsa.gov",
+				Nonce:    "{mock-nonce}",
 			},
 			resp: redeemResponse{
 				AccessToken:  "a1234",
@@ -250,10 +265,44 @@ func TestAzureV2ProviderRedeem(t *testing.T) {
 			name: "invalid issuer",
 			claims: &claims{
 				Issuer:   "https://example.com/bogus/issuer",
-				Audience: TestClientID,
+				Audience: testClientID,
 				Expiry:   jwt.NewNumericDate(time.Now().Add(10 * time.Second)),
 				Name:     "Michael Bland",
 				Email:    "michael.bland@gsa.gov",
+				Nonce:    "{mock-nonce}",
+			},
+			resp: redeemResponse{
+				AccessToken:  "a1234",
+				ExpiresIn:    10,
+				RefreshToken: "refresh12345",
+			},
+			expectedError: true,
+		},
+		{
+			name: "missing nonce",
+			claims: &claims{
+				Issuer:   "{mock-issuer}",
+				Audience: testClientID,
+				Expiry:   jwt.NewNumericDate(time.Now().Add(10 * time.Second)),
+				Name:     "Michael Bland",
+				Email:    "michael.bland@gsa.gov",
+			},
+			resp: redeemResponse{
+				AccessToken:  "a1234",
+				ExpiresIn:    10,
+				RefreshToken: "refresh12345",
+			},
+			expectedError: true,
+		},
+		{
+			name: "invalid nonce",
+			claims: &claims{
+				Issuer:   "{mock-issuer}",
+				Audience: testClientID,
+				Expiry:   jwt.NewNumericDate(time.Now().Add(10 * time.Second)),
+				Name:     "Michael Bland",
+				Email:    "michael.bland@gsa.gov",
+				Nonce:    "123456789",
 			},
 			resp: redeemResponse{
 				AccessToken:  "a1234",
@@ -297,7 +346,14 @@ func TestAzureV2ProviderRedeem(t *testing.T) {
 			// pointer to body to bypass chicken/egg issue w/ mock server urls
 			providerURL, server := newAzureProviderServer(&body, http.StatusOK, &privKey.PublicKey)
 			defer server.Close()
-			azureOIDCConfigURL = providerURL.String()
+			// swap the global OIDC URL template for a test provider URL
+			azureOIDCConfigURLTemplate = providerURL.String()
+
+			p := newAzureV2Provider(nil)
+			err = p.Configure(microsoftTenantID)
+			if err != nil {
+				t.Error(err)
+			}
 
 			if tc.claims != nil {
 				// create an instance of Builder that uses the rsa signer
@@ -305,6 +361,7 @@ func TestAzureV2ProviderRedeem(t *testing.T) {
 
 				// add claims to the Builder
 				tc.claims.Issuer = strings.Replace(tc.claims.Issuer, "{mock-issuer}", providerURL.String(), -1)
+				tc.claims.Nonce = strings.Replace(tc.claims.Nonce, "{mock-nonce}", p.calculateNonce("1234"), -1)
 				builder = builder.Claims(tc.claims)
 
 				// build and inject ID token into response
@@ -318,13 +375,6 @@ func TestAzureV2ProviderRedeem(t *testing.T) {
 			body, err = json.Marshal(tc.resp)
 			testutil.Equal(t, nil, err)
 
-			p := newAzureV2Provider(nil)
-			p.ClientID = TestClientID
-			p.ClientSecret = "456"
-			err = p.Configure(MicrosoftTenantID)
-			if err != nil {
-				t.Error(err)
-			}
 			// graph service mock has to be set after p.Configure
 			p.GraphService = &MockAzureGraphService{}
 
@@ -376,7 +426,7 @@ func TestAzureV2GetSignInURL(t *testing.T) {
 		expectedParams url.Values
 	}{
 		{
-			name:        "nonce values passed to azure should be deterministic, pass one",
+			name:        "nonce values passed to azure should validate, pass one",
 			redirectURI: "https://example.com/oauth/callback",
 			state:       "1234",
 			expectedParams: url.Values{
@@ -385,13 +435,12 @@ func TestAzureV2GetSignInURL(t *testing.T) {
 				"response_type": []string{"id_token code"},
 				"scope":         []string{"openid email profile offline_access"},
 				"state":         []string{"1234"},
-				"client_id":     []string{TestClientID},
-				"nonce":         []string{"KEB9Aopa"},
+				"client_id":     []string{testClientID},
 				"prompt":        []string{"consent"},
 			},
 		},
 		{
-			name:        "nonce values passed to azure should be deterministic, pass two",
+			name:        "nonce values passed to azure should validate, pass two",
 			redirectURI: "https://example.com/oauth/callback",
 			state:       "1234",
 			expectedParams: url.Values{
@@ -400,13 +449,12 @@ func TestAzureV2GetSignInURL(t *testing.T) {
 				"response_type": []string{"id_token code"},
 				"scope":         []string{"openid email profile offline_access"},
 				"state":         []string{"1234"},
-				"client_id":     []string{TestClientID},
-				"nonce":         []string{"KEB9Aopa"},
+				"client_id":     []string{testClientID},
 				"prompt":        []string{"consent"},
 			},
 		},
 		{
-			name:        "nonce values passed to azure should be deterministic, pass three",
+			name:        "nonce values passed to azure should validate, pass three",
 			redirectURI: "https://example.com/oauth/callback",
 			state:       "4321",
 			expectedParams: url.Values{
@@ -415,8 +463,7 @@ func TestAzureV2GetSignInURL(t *testing.T) {
 				"response_type": []string{"id_token code"},
 				"scope":         []string{"openid email profile offline_access"},
 				"state":         []string{"4321"},
-				"client_id":     []string{TestClientID},
-				"nonce":         []string{"x_PhEN0K"},
+				"client_id":     []string{testClientID},
 				"prompt":        []string{"consent"},
 			},
 		},
@@ -425,8 +472,6 @@ func TestAzureV2GetSignInURL(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newAzureV2Provider(nil)
-			p.ClientID = TestClientID
-			p.ClientSecret = "456"
 			p.Scope = "openid email profile offline_access"
 			p.ApprovalPrompt = "consent"
 
@@ -436,10 +481,16 @@ func TestAzureV2GetSignInURL(t *testing.T) {
 				t.Error(err)
 			}
 
-			if !reflect.DeepEqual(tc.expectedParams, parsedURL.Query()) {
-				t.Logf("expected params %+v", tc.expectedParams)
-				t.Logf("got      params %+v", parsedURL.Query())
-				t.Errorf("unexpected params returned")
+			for k := range tc.expectedParams {
+				if tc.expectedParams.Get(k) != parsedURL.Query().Get(k) {
+					t.Logf("expected param %s: %+v", k, tc.expectedParams.Get(k))
+					t.Logf("got      param %s: %+v", k, parsedURL.Query().Get(k))
+				}
+			}
+
+			nonce := parsedURL.Query().Get("nonce")
+			if p.validateNonce(nonce) != true {
+				t.Logf("expected valid nonce, got: %+v", nonce)
 			}
 		})
 	}

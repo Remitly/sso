@@ -158,6 +158,9 @@ func (o *Options) Validate() error {
 	if len(o.EmailDomains) == 0 {
 		msgs = append(msgs, "missing setting for email validation: email-domain required.\n      use email-domain=* to authorize all email addresses")
 	}
+	if len(o.ProxyRootDomains) == 0 {
+		msgs = append(msgs, "missing setting: proxy-root-domain")
+	}
 	if o.ProxyClientID == "" {
 		msgs = append(msgs, "missing setting: proxy-client-id")
 	}
@@ -259,7 +262,10 @@ func newProvider(o *Options) (providers.Provider, error) {
 	var singleFlightProvider providers.Provider
 	switch o.Provider {
 	case providers.AzureProviderName:
-		azureProvider := providers.NewAzureV2Provider(p)
+		azureProvider, err := providers.NewAzureV2Provider(p)
+		if err != nil {
+			return nil, err
+		}
 		azureProvider.Configure(o.AzureTenant)
 		singleFlightProvider = providers.NewSingleFlightProvider(azureProvider)
 	case providers.GoogleProviderName:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -21,14 +22,57 @@ type OIDCProvider struct {
 }
 
 // NewOIDCProvider creates a new generic OpenID Connect provider
-func NewOIDCProvider(p *ProviderData) *OIDCProvider {
-	p.ProviderName = "OpenID Connect"
-	return &OIDCProvider{ProviderData: p}
+func NewOIDCProvider(p *ProviderData, discoveryURL string) (*OIDCProvider, error) {
+	provider := &OIDCProvider{
+		ProviderData: p,
+	}
+	if p.ProviderName == "" {
+		p.ProviderName = "OpenID Connect"
+	}
+
+	// Configure discoverable provider data.
+	oidcProvider, err := oidc.NewProvider(context.Background(), discoveryURL)
+	if err != nil {
+		// TODO: This seems like it _should_ work for "common", but it doesn't
+		// Does anyone actually want to use this with "common" though?
+		return nil, err
+	}
+
+	provider.Verifier = oidcProvider.Verifier(&oidc.Config{
+		ClientID: p.ClientID,
+	})
+	// Set these only if they haven't been overridden
+	if p.SignInURL == nil || p.SignInURL.String() == "" {
+		p.SignInURL, err = url.Parse(oidcProvider.Endpoint().AuthURL)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if p.RedeemURL == nil || p.RedeemURL.String() == "" {
+		p.RedeemURL, err = url.Parse(oidcProvider.Endpoint().TokenURL)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if p.ProfileURL == nil || p.ProfileURL.String() == "" {
+		p.ProfileURL, err = url.Parse(azureOIDCProfileURL)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if p.Scope == "" {
+		p.Scope = "openid email profile offline_access"
+	}
+	if p.RedeemURL.String() == "" {
+		return nil, errors.New("redeem url must be set")
+	}
+
+	return provider, nil
 }
 
 // Redeem fulfills the Provider interface.
 // The authenticator uses this method to redeem the code provided to /callback after the user logs into their OpenID Connect account.
-func (p *OIDCProvider) Redeem(redirectURL, code string) (s *sessions.SessionState, err error) {
+func (p *OIDCProvider) Redeem(redirectURL, code string) (*sessions.SessionState, error) {
 	ctx := context.Background()
 	c := oauth2.Config{
 		ClientID:     p.ClientID,
@@ -70,28 +114,19 @@ func (p *OIDCProvider) Redeem(redirectURL, code string) (s *sessions.SessionStat
 		return nil, fmt.Errorf("email in id_token (%s) isn't verified", claims.Email)
 	}
 
-	s = &sessions.SessionState{
+	s := &sessions.SessionState{
 		AccessToken:     token.AccessToken,
 		RefreshToken:    token.RefreshToken,
 		RefreshDeadline: token.Expiry,
 		Email:           claims.Email,
 	}
 
-	return
+	return s, nil
 }
 
 // RefreshSessionIfNeeded takes in a SessionState and
 // returns false if the session is not refreshed and true if it is.
 func (p *OIDCProvider) RefreshSessionIfNeeded(s *sessions.SessionState) (bool, error) {
-	// if s == nil || s.RefreshDeadline.After(time.Now()) || s.RefreshToken == "" {
-	// 	return false, nil
-	// }
-	//
-	// origExpiration := s.RefreshDeadline
-	// s.RefreshDeadline = time.Now().Add(time.Second).Truncate(time.Second)
-	// fmt.Printf("refreshed access token %s (expired on %s)\n", s, origExpiration)
-	// return false, nil
-
 	if s == nil || !s.RefreshPeriodExpired() || s.RefreshToken == "" {
 		return false, nil
 	}
@@ -110,8 +145,7 @@ func (p *OIDCProvider) RefreshSessionIfNeeded(s *sessions.SessionState) (bool, e
 	return true, nil
 }
 
-// RefreshAccessToken uses default OAuth2 TokenSource method to get a new
-// access token.
+// RefreshAccessToken uses default OAuth2 TokenSource method to get a new access token.
 func (p *OIDCProvider) RefreshAccessToken(refreshToken string) (string, time.Duration, error) {
 	if refreshToken == "" {
 		return "", 0, errors.New("missing refresh token")

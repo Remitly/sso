@@ -2,27 +2,29 @@ package providers
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/buzzfeed/sso/internal/pkg/aead"
 	"github.com/buzzfeed/sso/internal/pkg/sessions"
 	"github.com/datadog/datadog-go/statsd"
 	"golang.org/x/oauth2"
 
 	log "github.com/buzzfeed/sso/internal/pkg/logging"
-	oidc "github.com/coreos/go-oidc"
 )
 
 var (
-	azureOIDCConfigURL  = "https://login.microsoftonline.com/{tenant}/v2.0"
-	azureOIDCProfileURL = "https://graph.microsoft.com/oidc/userinfo"
+	azureOIDCConfigURLTemplate = "https://login.microsoftonline.com/{tenant}/v2.0"
+	azureOIDCProfileURL        = "https://graph.microsoft.com/oidc/userinfo"
+
+	// This is a compile-time check to make sure our types correctly implement the interface:
+	// https://medium.com/@matryer/c167afed3aae
+	_ Provider = &AzureV2Provider{}
 )
 
 // AzureV2Provider is an Azure AD v2 specific implementation of the Provider interface.
@@ -33,17 +35,32 @@ type AzureV2Provider struct {
 	Tenant string
 
 	StatsdClient *statsd.Client
-
+	NonceCipher  aead.Cipher
 	GraphService GraphService
 }
 
 // NewAzureV2Provider creates a new AzureV2Provider struct
-func NewAzureV2Provider(p *ProviderData) *AzureV2Provider {
-	p.ProviderName = "Azure AD"
+func NewAzureV2Provider(p *ProviderData) (*AzureV2Provider, error) {
+	if p.ProviderName == "" {
+		p.ProviderName = "Azure AD"
+	}
+
+	if p.ClientSecret == "" {
+		return nil, errors.New("client secret cannot be empty")
+	}
+	// Can't guarantee the client secret will be 32 or 64 bytes in length,
+	// hash to derive a key, error on empty string to avoid silent failure.
+	key := sha256.Sum256([]byte(p.ClientSecret))
+	nonceCipher, err := aead.NewMiscreantCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+
 	return &AzureV2Provider{
 		ProviderData: p,
-		OIDCProvider: &OIDCProvider{ProviderData: p},
-	}
+		NonceCipher:  nonceCipher,
+		OIDCProvider: nil,
+	}, nil
 }
 
 // SetStatsdClient sets the azure provider statsd client
@@ -53,7 +70,7 @@ func (p *AzureV2Provider) SetStatsdClient(statsdClient *statsd.Client) {
 
 // Redeem fulfills the Provider interface.
 // The authenticator uses this method to redeem the code provided to /callback after the user logs into their Azure AD account.
-func (p *AzureV2Provider) Redeem(redirectURL, code string) (s *sessions.SessionState, err error) {
+func (p *AzureV2Provider) Redeem(redirectURL, code string) (*sessions.SessionState, error) {
 	ctx := context.Background()
 	c := oauth2.Config{
 		ClientID:     p.ClientID,
@@ -77,8 +94,8 @@ func (p *AzureV2Provider) Redeem(redirectURL, code string) (s *sessions.SessionS
 		return nil, fmt.Errorf("token response did not contain an id_token")
 	}
 
-	// should only happen if oidc autodiscovery is broken
-	if p.OIDCProvider.Verifier == nil {
+	// should only happen if oidc autodiscovery is broken or unconfigured
+	if p.OIDCProvider == nil || p.OIDCProvider.Verifier == nil {
 		return nil, fmt.Errorf("oidc verifier missing")
 	}
 
@@ -92,6 +109,7 @@ func (p *AzureV2Provider) Redeem(redirectURL, code string) (s *sessions.SessionS
 	var claims struct {
 		Email string `json:"email"`
 		UPN   string `json:"upn"`
+		Nonce string `json:"nonce"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("failed to parse id_token claims: %v", err)
@@ -99,11 +117,17 @@ func (p *AzureV2Provider) Redeem(redirectURL, code string) (s *sessions.SessionS
 	if claims.Email == "" {
 		return nil, fmt.Errorf("id_token did not contain an email")
 	}
+	if claims.Nonce == "" {
+		return nil, fmt.Errorf("id_token did not contain a nonce")
+	}
+	if !p.validateNonce(claims.Nonce) {
+		return nil, fmt.Errorf("unable to validate id_token nonce")
+	}
 	// TODO: test this w/ an account that uses an alias and compare email claim
 	// with UPN claim; UPN has usually been what you want, but I think it's not
 	// rendered as a full email address here.
 
-	s = &sessions.SessionState{
+	s := &sessions.SessionState{
 		AccessToken:  token.AccessToken,
 		RefreshToken: token.RefreshToken,
 
@@ -121,54 +145,27 @@ func (p *AzureV2Provider) Redeem(redirectURL, code string) (s *sessions.SessionS
 		}
 		s.Groups = groupNames
 	}
-	return
+	return s, nil
 }
 
 // Configure sets the Azure tenant ID value for the provider
 func (p *AzureV2Provider) Configure(tenant string) error {
 	p.Tenant = tenant
-	if tenant == "" {
+	if p.Tenant == "" {
+		// TODO: See below, "common" is the right default value, and while
+		// Azure AD docs suggest this should work, it results in an error.
 		p.Tenant = "common"
 	}
-	discoveryURL := strings.Replace(azureOIDCConfigURL, "{tenant}", p.Tenant, -1)
+	discoveryURL := strings.Replace(azureOIDCConfigURLTemplate, "{tenant}", p.Tenant, -1)
 
 	// Configure discoverable provider data.
-	oidcProvider, err := oidc.NewProvider(context.Background(), discoveryURL)
+	var err error
+	p.OIDCProvider, err = NewOIDCProvider(p.ProviderData, discoveryURL)
 	if err != nil {
-		// FIXME: this seems like it _should_ work for "common", but it doesn't
-		// Does anyone actually want to use this with "common" though?
 		return err
 	}
 
-	p.OIDCProvider.Verifier = oidcProvider.Verifier(&oidc.Config{
-		ClientID: p.ClientID,
-	})
-	// Set these only if they haven't been overridden
-	if p.SignInURL == nil || p.SignInURL.String() == "" {
-		p.SignInURL, err = url.Parse(oidcProvider.Endpoint().AuthURL)
-		if err != nil {
-			return err
-		}
-	}
-	if p.RedeemURL == nil || p.RedeemURL.String() == "" {
-		p.RedeemURL, err = url.Parse(oidcProvider.Endpoint().TokenURL)
-		if err != nil {
-			return err
-		}
-	}
-	if p.ProfileURL == nil || p.ProfileURL.String() == "" {
-		p.ProfileURL, err = url.Parse(azureOIDCProfileURL)
-	}
-	if err != nil {
-		return err
-	}
-	if p.Scope == "" {
-		p.Scope = "openid email profile offline_access"
-	}
-	if p.RedeemURL.String() == "" {
-		return errors.New("redeem url must be set")
-	}
-	p.GraphService = NewAzureGraphService(p.ClientID, p.ClientSecret, p.RedeemURL.String())
+	p.GraphService = NewMSGraphService(p.ClientID, p.ClientSecret, p.RedeemURL.String())
 	return nil
 }
 
@@ -193,8 +190,7 @@ func (p *AzureV2Provider) RefreshSessionIfNeeded(s *sessions.SessionState) (bool
 	return true, nil
 }
 
-// RefreshAccessToken uses default OAuth2 TokenSource method to get a new
-// access token.
+// RefreshAccessToken uses default OAuth2 TokenSource method to get a new access token.
 func (p *AzureV2Provider) RefreshAccessToken(refreshToken string) (string, time.Duration, error) {
 	if refreshToken == "" {
 		return "", 0, errors.New("missing refresh token")
@@ -222,12 +218,6 @@ func (p *AzureV2Provider) RefreshAccessToken(refreshToken string) (string, time.
 	return newToken.AccessToken, newToken.Expiry.Sub(time.Now()), nil
 }
 
-func getAzureHeader(accessToken string) http.Header {
-	header := make(http.Header)
-	header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-	return header
-}
-
 // ValidateSessionState attempts to validate the session state's access token.
 func (p *AzureV2Provider) ValidateSessionState(s *sessions.SessionState) bool {
 	// return validateToken(p, s.AccessToken, nil)
@@ -253,16 +243,34 @@ func (p *AzureV2Provider) GetSignInURL(redirectURI, state string) string {
 	return a.String()
 }
 
-// calculateNonce generates a deterministic nonce from the state value.
-// We don't have a session state pointer but we need to generate a nonce
-// that we can verify statelessly later. We can only use what's in the
-// params and provider struct to assemble a nonce. State is guaranteed to be
-// indistinguishable from random and will always change.
+// calculateNonce generates a verifiable nonce from the state value.
+// A nonce can be subsequently validated by attempting to decrypt it.
 func (p *AzureV2Provider) calculateNonce(state string) string {
-	key := []byte(p.ClientID + p.ClientSecret)
-	h := hmac.New(sha256.New, key)
-	h.Write([]byte(state))
-	return base64.URLEncoding.EncodeToString(h.Sum(nil))[:8]
+	rawNonce, err := p.NonceCipher.Encrypt([]byte(state))
+	if err != nil {
+		// GetSignInURL can't return an error and this shouldn't fail silently
+		panic(err)
+	}
+	return base64.URLEncoding.EncodeToString(rawNonce)
+}
+
+// validateNonce attempts to decrypt the nonce value. If it decrypts
+// successfully, the nonce is considered valid.
+func (p *AzureV2Provider) validateNonce(nonce string) bool {
+	rawNonce, err := base64.URLEncoding.DecodeString(nonce)
+	if err != nil {
+		return false
+	}
+	state, err := p.NonceCipher.Decrypt(rawNonce)
+	if err != nil {
+		return false
+	}
+	// Sanity check to ensure state contains roughly what we expect
+	_, err = base64.URLEncoding.DecodeString(string(state))
+	if err != nil {
+		return false
+	}
+	return true
 }
 
 // ValidateGroupMembership takes in an email and the allowed groups and returns the groups that the email is part of in that list.
@@ -292,13 +300,4 @@ func (p *AzureV2Provider) ValidateGroupMembership(email string, allGroups []stri
 	}
 
 	return filtered, nil
-}
-
-func contains(s []string, e string) bool {
-	for _, a := range s {
-		if a == e {
-			return true
-		}
-	}
-	return false
 }

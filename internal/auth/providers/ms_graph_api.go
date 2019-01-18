@@ -15,23 +15,28 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 )
 
-// AzureGroupCacheSize controls the size of the caches of AD group info
-const AzureGroupCacheSize = 1024
+// The Microsoft Graph API provides a mechanism to obtain group membership
+// information for users authenticated with the Azure AD provider.
+
+// azureGroupCacheSize controls the size of the caches of AD group info
+const azureGroupCacheSize = 1024
 
 // GraphService wraps calls to provider admin APIs
+//
+// This interface allows the service to be more readily mocked in tests.
 type GraphService interface {
 	GetGroups(string) ([]string, error)
 }
 
-// AzureGraphService implements graph API calls for the Azure provider
-type AzureGraphService struct {
+// MSGraphService implements graph API calls for the Azure provider
+type MSGraphService struct {
 	client               *http.Client
 	groupMembershipCache *lru.Cache
 	groupNameCache       *lru.Cache
 }
 
-// NewAzureGraphService creates a new graph service for getting groups
-func NewAzureGraphService(clientID string, clientSecret string, tokenURL string) *AzureGraphService {
+// NewMSGraphService creates a new graph service for getting groups
+func NewMSGraphService(clientID string, clientSecret string, tokenURL string) *MSGraphService {
 	clientConfig := &clientcredentials.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
@@ -42,15 +47,15 @@ func NewAzureGraphService(clientID string, clientSecret string, tokenURL string)
 	}
 	ctx := context.Background()
 	client := clientConfig.Client(ctx)
-	memberCache, err := lru.New(AzureGroupCacheSize)
+	memberCache, err := lru.New(azureGroupCacheSize)
 	if err != nil {
-		panic(err) // Should only happen if AzureGroupCacheSize is a negative number
+		panic(err) // Should only happen if azureGroupCacheSize is a negative number
 	}
-	nameCache, err := lru.New(AzureGroupCacheSize)
+	nameCache, err := lru.New(azureGroupCacheSize)
 	if err != nil {
-		panic(err) // Should only happen if AzureGroupCacheSize is a negative number
+		panic(err) // Should only happen if azureGroupCacheSize is a negative number
 	}
-	return &AzureGraphService{
+	return &MSGraphService{
 		client:               client,
 		groupMembershipCache: memberCache,
 		groupNameCache:       nameCache,
@@ -58,16 +63,16 @@ func NewAzureGraphService(clientID string, clientSecret string, tokenURL string)
 }
 
 // GetGroups lists groups user belongs to.
-func (gs *AzureGraphService) GetGroups(email string) ([]string, error) {
+func (gs *MSGraphService) GetGroups(email string) ([]string, error) {
 	if gs.client == nil {
-		return []string{}, errors.New("oauth client must be configured")
+		return nil, errors.New("oauth client must be configured")
 	}
 	if email == "" {
-		return []string{}, errors.New("missing email")
+		return nil, errors.New("missing email")
 	}
 
 	var wg sync.WaitGroup
-	var mtx sync.Mutex
+	var mux sync.Mutex
 	var err error
 	groupNames := make([]string, 0)
 	// See: https://developer.microsoft.com/en-us/graph/docs/api-reference/beta/api/user_getmembergroups
@@ -76,25 +81,27 @@ func (gs *AzureGraphService) GetGroups(email string) ([]string, error) {
 	for {
 		groupResponse, err := gs.client.Post(requestURL, "application/json", strings.NewReader(requestBody))
 		if err != nil {
-			return []string{}, err
+			return nil, err
 		}
 
 		groupData := struct {
+			// Link to next page of data, see:
+			// https://docs.microsoft.com/en-us/graph/query-parameters#skip-parameter
 			Next  string   `json:"@odata.nextLink"`
 			Value []string `json:"value"`
 		}{}
 
 		body, err := ioutil.ReadAll(groupResponse.Body)
 		if err != nil {
-			return []string{}, err
+			return nil, err
 		}
-		if groupResponse.StatusCode >= 400 {
-			return []string{}, fmt.Errorf("api error: %s", string(body))
+		if groupResponse.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("api error: %s", string(body))
 		}
 
 		err = json.Unmarshal(body, &groupData)
 		if err != nil {
-			return []string{}, err
+			return nil, err
 		}
 
 		for _, groupID := range groupData.Value {
@@ -105,10 +112,11 @@ func (gs *AzureGraphService) GetGroups(email string) ([]string, error) {
 
 				var name string
 				// check the cache for the group name first
-				cachedName, ok := gs.groupNameCache.Get(id)
-				if !ok {
+				if cachedName, ok := gs.groupNameCache.Get(id); !ok {
 					// didn't have the group name, make concurrent API call to fetch it
 					name, err = gs.getGroupName(id)
+					// the err value is not shadowed in the goroutine, so if this isn't
+					// nil, it will return the err value after wg.Wait() is called
 					if err == nil {
 						// got the name ok, populate the cache
 						gs.groupNameCache.Add(id, name)
@@ -117,9 +125,9 @@ func (gs *AzureGraphService) GetGroups(email string) ([]string, error) {
 					// cache hit
 					name = cachedName.(string)
 				}
-				mtx.Lock()
+				mux.Lock()
 				groupNames = append(groupNames, name)
-				mtx.Unlock()
+				mux.Unlock()
 			}(&wg)
 		}
 
@@ -130,15 +138,16 @@ func (gs *AzureGraphService) GetGroups(email string) ([]string, error) {
 		}
 	}
 	wg.Wait()
+	// any err value set above will cause this to fail
 	if err != nil {
-		return []string{}, err
+		return nil, err
 	}
 
 	return groupNames, nil
 }
 
 // getGroupName returns the group name, preferentially pulling from cache
-func (gs *AzureGraphService) getGroupName(id string) (string, error) {
+func (gs *MSGraphService) getGroupName(id string) (string, error) {
 	if gs.client == nil {
 		return "", errors.New("oauth client must be configured")
 	}
@@ -157,7 +166,7 @@ func (gs *AzureGraphService) getGroupName(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if groupMetaResponse.StatusCode >= 400 {
+	if groupMetaResponse.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("api error: %s", string(body))
 	}
 
