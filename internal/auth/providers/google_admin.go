@@ -18,6 +18,8 @@ import (
 )
 
 // AdminService wraps calls to provider admin APIs
+//
+// This interface allows the service to be more readily mocked in tests.
 type AdminService interface {
 	GetMembers(string) ([]string, error)
 	GetGroups(string) ([]string, error)

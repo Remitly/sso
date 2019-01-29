@@ -15,7 +15,7 @@ import (
 
 var (
 	// This is a compile-time check to make sure our types correctly implement the interface:
-	// https://medium.com/@matryer/golang-tip-compile-time-checks-to-ensure-your-type-satisfies-an-interface-c167afed3aae
+	// https://medium.com/@matryer/c167afed3aae
 	_ Provider = &SingleFlightProvider{}
 )
 
@@ -63,6 +63,8 @@ func (p *SingleFlightProvider) do(endpoint, key string, fn func() (interface{}, 
 func (p *SingleFlightProvider) AssignStatsdClient(StatsdClient *statsd.Client) {
 	p.StatsdClient = StatsdClient
 	switch v := p.provider.(type) {
+	case *AzureV2Provider:
+		v.SetStatsdClient(StatsdClient)
 	case *GoogleProvider:
 		v.SetStatsdClient(StatsdClient)
 	}
