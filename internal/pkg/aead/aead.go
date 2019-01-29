@@ -99,7 +99,7 @@ func (c *MiscreantCipher) Marshal(s interface{}) (string, error) {
 		return "", err
 	}
 
-	// gzip the bytes
+	// gunzip the bytes
 	var jsonBuffer bytes.Buffer
 	w := gzip.NewWriter(&jsonBuffer)
 	w.Write(plaintext)
@@ -132,9 +132,12 @@ func (c *MiscreantCipher) Unmarshal(value string, s interface{}) error {
 		return err
 	}
 
-	// gunzip the bytes
+	// gzip the bytes
 	var jsonBuffer bytes.Buffer
 	r, err := gzip.NewReader(bytes.NewBuffer(plaintext))
+	if err != nil {
+		return err
+	}
 	io.Copy(&jsonBuffer, r)
 
 	// unmarshal bytes
