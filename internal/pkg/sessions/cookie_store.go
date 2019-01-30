@@ -252,12 +252,7 @@ func (s *CookieStore) SetCSRF(rw http.ResponseWriter, req *http.Request, val str
 
 // GetCSRF gets the CSRFCookie creates a CSRF cookie in a given request
 func (s *CookieStore) GetCSRF(req *http.Request) (*http.Cookie, error) {
-	c, err := req.Cookie(s.CSRFCookieName)
-	if err != nil {
-		// always http.ErrNoCookie
-		return nil, fmt.Errorf("missing %s cookie", s.CSRFCookieName)
-	}
-	return c, nil
+	return req.Cookie(s.CSRFCookieName)
 }
 
 // ClearSession clears the session cookie from a request
@@ -275,7 +270,7 @@ func (s *CookieStore) LoadSession(req *http.Request) (*SessionState, error) {
 	firstCookie, err := req.Cookie(fmt.Sprintf("%s_0", s.Name))
 	if err != nil {
 		// always http.ErrNoCookie
-		return nil, fmt.Errorf("missing %s cookie", s.CSRFCookieName)
+		return nil, err
 	}
 	byteSize := parsePrefix(firstCookie.Value)
 	if byteSize < 0 {
