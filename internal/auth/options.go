@@ -51,7 +51,9 @@ import (
 // StatsdPort - port where statsd client listens
 // StatsdHost - host where statsd client listens
 type Options struct {
-	RedirectURL       string `envconfig:"REDIRECT_URL" `
+	IssuerURL string `envconfig:"ISSUER_URL"`
+	// RedirectURL is deprecated. Use IssuerURL instead.
+	RedirectURL       string `envconfig:"REDIRECT_URL"`
 	ClientID          string `envconfig:"CLIENT_ID"`
 	ClientSecret      string `envconfig:"CLIENT_SECRET"`
 	ProxyClientID     string `envconfig:"PROXY_CLIENT_ID"`
@@ -82,6 +84,8 @@ type Options struct {
 
 	AuthCodeSecret string `envconfig:"AUTH_CODE_SECRET"`
 
+	SigningKeyPath string `envconfig:"JOSE_SIGNING_KEY" default:"./signer.key"`
+
 	GroupsCacheRefreshTTL time.Duration `envconfig:"GROUPS_CACHE_REFRESH_TTL" default:"10m"`
 	SessionLifetimeTTL    time.Duration `envconfig:"SESSION_LIFETIME_TTL" default:"720h"`
 
@@ -106,6 +110,7 @@ type Options struct {
 
 	// internal values that are set after config validation
 	redirectURL         *url.URL
+	issuerURL           *url.URL
 	decodedCookieSecret []byte
 	GroupsCacheStopFunc func()
 }
@@ -170,7 +175,21 @@ func (o *Options) Validate() error {
 		msgs = append(msgs, "missing setting: required-host-header")
 	}
 
-	o.redirectURL, msgs = parseURL(o.RedirectURL, "redirect", msgs)
+	if o.IssuerURL != "" {
+		o.redirectURL, msgs = parseURL(o.IssuerURL, "issuer", msgs)
+	} else {
+		// Deprecated; this can be cleaned up once REDIRECT_URL is unused
+		o.redirectURL, msgs = parseURL(o.RedirectURL, "redirect", msgs)
+	}
+	if o.redirectURL != nil {
+		// make a copy rather than parsing twice and doubling error messages
+		issuerURL := *o.redirectURL
+		o.issuerURL = &issuerURL
+		o.redirectURL.Path = "/oauth2/callback"
+	}
+	if o.issuerURL != nil {
+		o.issuerURL.Path = ""
+	}
 
 	msgs = validateEndpoints(o, msgs)
 

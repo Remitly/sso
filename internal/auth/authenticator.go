@@ -1,11 +1,18 @@
 package auth
 
 import (
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -14,6 +21,8 @@ import (
 	log "github.com/buzzfeed/sso/internal/pkg/logging"
 	"github.com/buzzfeed/sso/internal/pkg/sessions"
 	"github.com/buzzfeed/sso/internal/pkg/templates"
+	jose "gopkg.in/square/go-jose.v2"
+	jwt "gopkg.in/square/go-jose.v2/jwt"
 
 	"github.com/datadog/datadog-go/statsd"
 )
@@ -46,7 +55,10 @@ type Authenticator struct {
 	csrfStore    sessions.CSRFStore
 	sessionStore sessions.SessionStore
 
-	redirectURL        *url.URL // the url to receive requests at
+	// issuerURL identifies the auth server as an identity provider
+	issuerURL *url.URL
+	// redirectURL is the OAuth 2 callback URL
+	redirectURL        *url.URL
 	provider           providers.Provider
 	ProxyPrefix        string
 	ServeMux           http.Handler
@@ -55,6 +67,9 @@ type Authenticator struct {
 	PassUserHeaders    bool
 
 	AuthCodeCipher aead.Cipher
+
+	keySet *jose.JSONWebKeySet
+	signer jose.Signer
 
 	ProxyClientID     string
 	ProxyClientSecret string
@@ -72,6 +87,7 @@ type Authenticator struct {
 type redeemResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
+	IDToken      string `json:"id_token"`
 	ExpiresIn    int64  `json:"expires_in"`
 	Email        string `json:"email"`
 }
@@ -119,12 +135,34 @@ func SetCookieStore(opts *Options) func(*Authenticator) error {
 	}
 }
 
+func loadSigningKey(privateKeyPath string) (*jose.JSONWebKey, error) {
+	keyBytes, err := ioutil.ReadFile(privateKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(keyBytes)
+	if block == nil {
+		err = errors.New("unable to locate PEM encoded block")
+		return nil, err
+	}
+	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	// Use the SHA256 hash of the public key as the key ID
+	publicKey := privateKey.Public().(*rsa.PublicKey)
+	keyID := fmt.Sprintf("%x", sha256.Sum256(x509.MarshalPKCS1PublicKey(publicKey)))
+	// Create a signing key using RSA-PKCS#1v1.5 with SHA-256.
+	key := &jose.JSONWebKey{Algorithm: string(jose.RS256), Key: privateKey, KeyID: keyID}
+	return key, nil
+}
+
 // NewAuthenticator creates a Authenticator struct and applies the optional functions slice to the struct.
 func NewAuthenticator(opts *Options, optionFuncs ...func(*Authenticator) error) (*Authenticator, error) {
 	logger := log.NewLogEntry()
 
 	redirectURL := opts.redirectURL
-	redirectURL.Path = "/oauth2/callback"
+	issuerURL := opts.issuerURL
 
 	templates := templates.NewHTMLTemplate()
 
@@ -136,6 +174,29 @@ func NewAuthenticator(opts *Options, optionFuncs ...func(*Authenticator) error) 
 		proxyRootDomains = append(proxyRootDomains, domain)
 	}
 
+	// set up JWKS & JWT signer
+	var signer jose.Signer
+	var keySet *jose.JSONWebKeySet
+	if _, err := os.Stat(opts.SigningKeyPath); err == nil {
+		jwkPriv, err := loadSigningKey(opts.SigningKeyPath)
+		if err != nil {
+			logger.Error(err)
+			return nil, err
+		}
+		signer, err = jose.NewSigner(jose.SigningKey{
+			Algorithm: jose.SignatureAlgorithm(jwkPriv.Algorithm), Key: jwkPriv.Key}, nil)
+		if err != nil {
+			logger.Error(err)
+			return nil, err
+		}
+		jwkPub := jwkPriv.Public()
+		keySet = &jose.JSONWebKeySet{
+			Keys: []jose.JSONWebKey{jwkPub},
+		}
+	} else {
+		fmt.Println("file not found")
+	}
+
 	p := &Authenticator{
 		ProxyClientID:     opts.ProxyClientID,
 		ProxyClientSecret: opts.ProxyClientSecret,
@@ -145,6 +206,9 @@ func NewAuthenticator(opts *Options, optionFuncs ...func(*Authenticator) error) 
 		CookieSecure:      opts.CookieSecure,
 
 		redirectURL:        redirectURL,
+		issuerURL:          issuerURL,
+		signer:             signer,
+		keySet:             keySet,
 		SetXAuthRequest:    opts.SetXAuthRequest,
 		PassUserHeaders:    opts.PassUserHeaders,
 		SkipProviderButton: opts.SkipProviderButton,
@@ -180,6 +244,8 @@ func (p *Authenticator) newMux() http.Handler {
 	serviceMux.HandleFunc("/start", p.withMethods(p.OAuthStart, "GET"))
 	serviceMux.HandleFunc("/sign_in", p.withMethods(p.validateClientID(p.validateRedirectURI(p.validateSignature(p.SignIn))), "GET"))
 	serviceMux.HandleFunc("/sign_out", p.withMethods(p.validateRedirectURI(p.validateSignature(p.SignOut)), "GET", "POST"))
+	serviceMux.HandleFunc("/.well-known/openid-configuration", p.withMethods(p.OIDCConfig, "GET"))
+	serviceMux.HandleFunc("/oauth2/keys", p.withMethods(p.JSONWebKeySet, "GET"))
 	serviceMux.HandleFunc("/oauth2/callback", p.withMethods(p.OAuthCallback, "GET"))
 	serviceMux.HandleFunc("/profile", p.withMethods(p.validateClientID(p.validateClientSecret(p.GetProfile)), "GET"))
 	serviceMux.HandleFunc("/validate", p.withMethods(p.validateClientID(p.validateClientSecret(p.ValidateToken)), "GET"))
@@ -516,6 +582,48 @@ func (p *Authenticator) SignOutPage(rw http.ResponseWriter, req *http.Request, m
 	return
 }
 
+type oidcConfigResponse struct {
+	Issuer   string `json:"issuer"`
+	AuthURL  string `json:"authorization_endpoint"`
+	TokenURL string `json:"token_endpoint"`
+	JWKSURL  string `json:"jwks_uri"`
+}
+
+// OIDCConfig handles the OpenID Connect configuration response.
+// See https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderConfig
+func (p *Authenticator) OIDCConfig(rw http.ResponseWriter, req *http.Request) {
+	authURL, _ := url.Parse("/redeem")
+	tokenURL, _ := url.Parse("/refresh")
+	jwksURL, _ := url.Parse("/oauth2/keys")
+	config := &oidcConfigResponse{
+		Issuer:   p.issuerURL.String(),
+		AuthURL:  p.issuerURL.ResolveReference(authURL).String(),
+		TokenURL: p.issuerURL.ResolveReference(tokenURL).String(),
+		JWKSURL:  p.issuerURL.ResolveReference(jwksURL).String(),
+	}
+	rw.WriteHeader(http.StatusOK)
+	jsonBytes, err := json.Marshal(config)
+	if err != nil {
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	rw.Header().Set("Content-Type", "application/json")
+	rw.Write(jsonBytes)
+}
+
+// JSONWebKeySet serializes and returns the Authenticator's public key set.
+// See https://tools.ietf.org/html/rfc7517
+func (p *Authenticator) JSONWebKeySet(rw http.ResponseWriter, req *http.Request) {
+	rw.WriteHeader(http.StatusOK)
+	jsonBytes, err := json.Marshal(p.keySet)
+	if err != nil {
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	rw.Header().Set("Content-Type", "application/json")
+	rw.Write(jsonBytes)
+}
+
 // OAuthStart starts the authentication process by redirecting to the provider. It provides a
 // `redirectURI`, allowing the provider to redirect back to the sso proxy after authentication.
 func (p *Authenticator) OAuthStart(rw http.ResponseWriter, req *http.Request) {
@@ -554,6 +662,32 @@ func (p *Authenticator) OAuthStart(rw http.ResponseWriter, req *http.Request) {
 	state := base64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("%v:%v", nonce, authRedirectURL.String())))
 	signInURL := p.provider.GetSignInURL(redirectURI, state)
 	http.Redirect(rw, req, signInURL, http.StatusFound)
+}
+
+type claims struct {
+	jwt.Claims
+	Email  string   `json:"email"`
+	Groups []string `json:"groups"`
+}
+
+func (p *Authenticator) generateIDToken(email string, user string, groups []string, expires time.Time) (string, error) {
+	cl := claims{
+		Claims: jwt.Claims{
+			Subject:   user,
+			Issuer:    p.issuerURL.String(),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			NotBefore: jwt.NewNumericDate(time.Now().Add(-5 * time.Second)),
+			Expiry:    jwt.NewNumericDate(expires),
+		},
+		Email:  email,
+		Groups: groups,
+	}
+	raw, err := jwt.Signed(p.signer).Claims(cl).CompactSerialize()
+	if err != nil {
+		return "", err
+	}
+	fmt.Println(raw)
+	return raw, err
 }
 
 func (p *Authenticator) redeemCode(host, code string) (*sessions.SessionState, error) {
@@ -724,9 +858,24 @@ func (p *Authenticator) Redeem(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Issue new ID token with claims for user and groups, valid for the full lifetime
+	// and not refreshed.
+	idToken, err := p.generateIDToken(session.Email, session.User, session.Groups,
+		session.LifetimeDeadline.Add(5*time.Minute))
+	if err != nil {
+		tags = append(tags, "error:generate_id_token_failed")
+		p.StatsdClient.Incr("application_error", tags, 1.0)
+		logger.WithUser(session.Email).WithRefreshDeadline(session.RefreshDeadline).WithLifetimeDeadline(session.LifetimeDeadline).Error("expired session")
+		p.sessionStore.ClearSession(rw, req)
+
+		http.Error(rw, fmt.Sprintf("invalid id token"), http.StatusUnauthorized)
+		return
+	}
+
 	response := redeemResponse{
 		AccessToken:  session.AccessToken,
 		RefreshToken: session.RefreshToken,
+		IDToken:      idToken,
 		ExpiresIn:    int64(session.RefreshDeadline.Sub(time.Now()).Seconds()),
 		Email:        session.Email,
 	}
