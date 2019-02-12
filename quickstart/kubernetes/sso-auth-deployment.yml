@@ -30,7 +30,7 @@ spec:
             value: 'mydomain.com'
           - name: HOST
             value: sso-auth.mydomain.com
-          - name: REDIRECT_URL
+          - name: ISSUER_URL
             value: https://sso-auth.mydomain.com
           - name: PROXY_ROOT_DOMAIN
             value: mydomain.com

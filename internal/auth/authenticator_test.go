@@ -80,6 +80,7 @@ func testOpts(proxyClientID, proxyClientSecret string) *Options {
 	opts.AuthCodeSecret = testAuthCodeSecret
 	opts.ProxyRootDomains = []string{"example.com"}
 	opts.Host = "/"
+	opts.SigningKeyPath = "./testdata/private_key.pem"
 	return opts
 }
 
