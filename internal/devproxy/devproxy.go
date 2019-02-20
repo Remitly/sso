@@ -33,7 +33,7 @@ const statusInvalidHost = 421
 
 // DevProxy stores all the information associated with proxying the request.
 type DevProxy struct {
-	redirectURL       *url.URL // the url to receive requests at
+	// redirectURL       *url.URL // the url to receive requests at
 	skipAuthPreflight bool
 	templates         *template.Template
 	mux               map[string]*route
@@ -104,7 +104,9 @@ func newUpstreamTransport(insecureSkipVerify bool) *upstreamTransport {
 
 // ServeHTTP calls the upstream's ServeHTTP function.
 func (u *UpstreamProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+
 	if u.requestSigner != nil {
+
 		u.requestSigner.Sign(r)
 	}
 
@@ -112,7 +114,7 @@ func (u *UpstreamProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u.handler.ServeHTTP(w, r)
 	duration := time.Now().Sub(start)
 
-	fmt.Sprintf("service_name:%s, duation:%s", u.name, duration)
+	fmt.Printf("service_name:%s, duration:%s", u.name, duration)
 }
 
 func singleJoiningSlash(a, b string) string {
@@ -152,10 +154,6 @@ func NewReverseProxy(to *url.URL, config *UpstreamConfig) *httputil.ReverseProxy
 
 	proxy.Director = func(req *http.Request) {
 		req.Header.Add("X-Forwarded-Host", req.Host)
-		req.Header.Set("X-Forwarded-User", req.Header.Get("User"))
-		req.Header.Set("X-Forwarded-Email", req.Header.Get("Email"))
-		req.Header.Set("X-Forwarded-Groups", req.Header.Get("Groups"))
-		req.Header.Set("X-Forwarded-Access-Token", "")
 		dir(req)
 		req.Host = to.Host
 	}
@@ -185,10 +183,6 @@ func NewRewriteReverseProxy(route *RewriteRoute, config *UpstreamConfig) *httput
 		director := httputil.NewSingleHostReverseProxy(target).Director
 
 		req.Header.Add("X-Forwarded-Host", req.Host)
-		req.Header.Set("X-Forwarded-User", req.Header.Get("User"))
-		req.Header.Set("X-Forwarded-Email", req.Header.Get("Email"))
-		req.Header.Set("X-Forwarded-Groups", req.Header.Get("Groups"))
-		req.Header.Set("X-Forwarded-Access-Token", "")
 		director(req)
 		req.Host = target.Host
 	}
@@ -202,6 +196,7 @@ func NewReverseProxyHandler(reverseProxy *httputil.ReverseProxy, opts *Options, 
 		handler:       reverseProxy,
 		requestSigner: signer,
 	}
+
 	if config.SkipRequestSigning {
 		upstreamProxy.requestSigner = nil
 	}
@@ -255,18 +250,23 @@ func NewDevProxy(opts *Options, optFuncs ...func(*DevProxy) error) (*DevProxy, e
 	// Also build the `certs` static JSON-string which will be served from a public endpoint.
 	// The key published at this endpoint allows upstreams to decrypt the `Sso-Signature`
 	// header, and validate the integrity and authenticity of a request.
+
 	certs := make(map[string]string)
 	var requestSigner *RequestSigner
+	var err error
 	if len(opts.RequestSigningKey) > 0 {
-		requestSigner, err := NewRequestSigner(opts.RequestSigningKey)
+		requestSigner, err = NewRequestSigner(opts.RequestSigningKey)
+
 		if err != nil {
 			return nil, fmt.Errorf("could not build RequestSigner: %s", err)
 		}
 		id, key := requestSigner.PublicKey()
 		certs[id] = key
+
 	} else {
 		logger.Warn("Running DevProxy without signing key. Requests will not be signed.")
 	}
+
 	certsAsStr, err := json.MarshalIndent(certs, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("could not marshal public certs as JSON: %s", err)
@@ -277,7 +277,7 @@ func NewDevProxy(opts *Options, optFuncs ...func(*DevProxy) error) (*DevProxy, e
 		mux:         make(map[string]*route),
 		regexRoutes: make([]*route, 0),
 
-		redirectURL:     &url.URL{Path: "/oauth2/callback"},
+		// redirectURL:     &url.URL{Path: "/oauth2/callback"},
 		templates:       getTemplates(),
 		requestSigner:   requestSigner,
 		publicCertsJSON: certsAsStr,
@@ -301,7 +301,7 @@ func NewDevProxy(opts *Options, optFuncs ...func(*DevProxy) error) (*DevProxy, e
 			handler, tags := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, requestSigner)
 			p.HandleRegex(route.FromRegex, handler, tags, upstreamConfig)
 		default:
-			return nil, fmt.Errorf("unkown route type")
+			return nil, fmt.Errorf("unknown route type")
 		}
 	}
 
@@ -342,6 +342,11 @@ func (p *DevProxy) RobotsTxt(rw http.ResponseWriter, _ *http.Request) {
 
 // Favicon will proxy the request as usual
 func (p *DevProxy) Favicon(rw http.ResponseWriter, req *http.Request) {
+	err := p.setProxyHeaders(rw, req)
+	if err != nil {
+		rw.WriteHeader(http.StatusNotFound)
+		return
+	}
 	rw.WriteHeader(http.StatusOK)
 	p.Proxy(rw, req)
 }
@@ -391,10 +396,10 @@ func (p *DevProxy) isXMLHTTPRequest(req *http.Request) bool {
 func (p *DevProxy) Proxy(rw http.ResponseWriter, req *http.Request) {
 
 	logger := log.NewLogEntry()
-	// start := time.Now()
-	logger.Info("Proxy...")
+	p.setProxyHeaders(rw, req)
 
-	// We have validated the users request and now proxy their request to the provided upstream.
+	logger.Info("Proxy...")
+	// We now proxy their request to the provided upstream.
 	route, ok := p.router(req)
 	if !ok {
 		p.UnknownHost(rw, req)
@@ -422,6 +427,14 @@ func (p *DevProxy) Handle(host string, handler http.Handler, tags []string, upst
 func (p *DevProxy) HandleRegex(regex *regexp.Regexp, handler http.Handler, tags []string, upstreamConfig *UpstreamConfig) {
 	tags = append(tags, "route:rewrite")
 	p.regexRoutes = append(p.regexRoutes, &route{regex: regex, handler: handler, upstreamConfig: upstreamConfig, tags: tags})
+}
+
+func (p *DevProxy) setProxyHeaders(rw http.ResponseWriter, req *http.Request) (err error) {
+	req.Header.Set("X-Forwarded-User", req.Header.Get("User"))
+	req.Header.Set("X-Forwarded-Email", req.Header.Get("Email"))
+	req.Header.Set("X-Forwarded-Groups", req.Header.Get("groups"))
+	// req.Header.set("X-Forwarded-Access-Token", "")
+	return nil
 }
 
 // router attempts to find a route for a request. If a route is successfully matched,

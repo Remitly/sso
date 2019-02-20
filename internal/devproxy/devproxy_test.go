@@ -262,7 +262,7 @@ func TestCerts(t *testing.T) {
 	opts.RequestSigningKey = string(requestSigningKey)
 	opts.Validate()
 
-	expectedPublicKey, err := ioutil.ReadFile("testdata/public_key.pub")
+	expectedPublicKey, err := ioutil.ReadFile("testdata/public_key.pem")
 	testutil.Assert(t, err == nil, "could not read public key from testdata: %s", err)
 
 	var keyHash []byte
@@ -798,7 +798,7 @@ func TestTimeoutHandler(t *testing.T) {
 			if res.StatusCode != tc.ExpectedStatusCode {
 				t.Errorf(" got=%v", res.StatusCode)
 				t.Errorf("want=%v", tc.ExpectedStatusCode)
-				t.Fatalf("got unexpcted status code")
+				t.Fatalf("got unexpected status code")
 			}
 
 			body, err := ioutil.ReadAll(res.Body)
@@ -809,7 +809,7 @@ func TestTimeoutHandler(t *testing.T) {
 			if string(body) != tc.ExpectedBody {
 				t.Errorf(" got=%q", body)
 				t.Errorf("want=%q", tc.ExpectedBody)
-				t.Fatalf("got unexpcted body")
+				t.Fatalf("got unexpected body")
 			}
 		})
 	}
@@ -868,7 +868,7 @@ func TestRewriteRoutingHandling(t *testing.T) {
 
 	upstreamHost, upstreamPort, err := net.SplitHostPort(parsedUpstreamURL.Host)
 	if err != nil {
-		t.Fatalf("expected to split host/hort err:%q", err)
+		t.Fatalf("expected to split host/port err:%q", err)
 	}
 
 	testCases := []struct {
@@ -902,7 +902,7 @@ func TestRewriteRoutingHandling(t *testing.T) {
 			ExpectedCode: statusInvalidHost,
 		},
 		{
-			Name:         "it should match and replace using regex/template to find port in embeded domain",
+			Name:         "it should match and replace using regex/template to find port in embedded domain",
 			TestHost:     fmt.Sprintf("somedomain--%s", upstreamPort),
 			FromRegex:    "somedomain--(.*)",                 // capture port
 			ToTemplate:   fmt.Sprintf("%s:$1", upstreamHost), // add port to dest

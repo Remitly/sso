@@ -134,7 +134,7 @@ func TestSignatureRoundTripDecoding(t *testing.T) {
 	privateKey, err := ioutil.ReadFile("testdata/private_key.pem")
 	testutil.Assert(t, err == nil, "error reading private key from testdata")
 
-	publicKey, err := ioutil.ReadFile("testdata/public_key.pub")
+	publicKey, err := ioutil.ReadFile("testdata/public_key.pem")
 	testutil.Assert(t, err == nil, "error reading public key from testdata")
 
 	// Build the RequestSigner object used to generate the request signature header.

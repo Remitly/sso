@@ -1,6 +1,8 @@
-- service: httpbin
+- service: dev-shim
   default:
-    from: httpbin.sso.localtest.me
-    to: http://httpheader.net
+    from: http://localhost:4888
+    to: http://localhost:4810
+    options:
+        skip_request_signing: false
 
 
