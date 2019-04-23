@@ -674,6 +674,7 @@ func (p *Authenticator) generateIDToken(email string, user string, groups []stri
 	cl := claims{
 		Claims: jwt.Claims{
 			Subject:   user,
+			Audience:  jwt.Audience{p.ProxyClientID},
 			Issuer:    p.issuerURL.String(),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now().Add(-5 * time.Second)),
@@ -682,11 +683,11 @@ func (p *Authenticator) generateIDToken(email string, user string, groups []stri
 		Email:  email,
 		Groups: groups,
 	}
+
 	raw, err := jwt.Signed(p.signer).Claims(cl).CompactSerialize()
 	if err != nil {
 		return "", err
 	}
-	fmt.Println(raw)
 	return raw, err
 }
 

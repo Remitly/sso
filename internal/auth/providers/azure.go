@@ -107,9 +107,9 @@ func (p *AzureV2Provider) Redeem(redirectURL, code string) (*sessions.SessionSta
 
 	// Extract custom claims.
 	var claims struct {
-		Email string `json:"email"`
-		UPN   string `json:"upn"`
-		Nonce string `json:"nonce"`
+		Email             string `json:"email"`
+		PreferredUsername string `json:"preferred_username"`
+		Nonce             string `json:"nonce"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("failed to parse id_token claims: %v", err)
@@ -135,7 +135,7 @@ func (p *AzureV2Provider) Redeem(redirectURL, code string) (*sessions.SessionSta
 		LifetimeDeadline: sessions.ExtendDeadline(p.SessionLifetimeTTL),
 
 		Email: claims.Email,
-		User:  claims.UPN,
+		// User:  claims.PreferredUsername,
 	}
 
 	if p.GraphService != nil {
