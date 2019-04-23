@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -61,67 +60,15 @@ func TestInitializedOptions(t *testing.T) {
 	testutil.Equal(t, nil, o.Validate())
 }
 
-func TestIssuerAndRedirectURLs(t *testing.T) {
-	testCases := []struct {
-		name                string
-		issuerURL           string
-		redirectURL         string
-		expectedRedirectURL *url.URL
-		expectedIssuerURL   *url.URL
-		expectedError       error
-	}{
-		{
-			name:        "valid redirect URL",
-			redirectURL: "https://myhost.com/oauth2/callback",
-			expectedRedirectURL: &url.URL{
-				Scheme: "https", Host: "myhost.com", Path: "/oauth2/callback"},
-			expectedIssuerURL: &url.URL{
-				Scheme: "https", Host: "myhost.com", Path: ""},
-			expectedError: nil,
-		},
-		{
-			name:      "valid issuer URL",
-			issuerURL: "https://myhost.com/oauth2/callback",
-			expectedRedirectURL: &url.URL{
-				Scheme: "https", Host: "myhost.com", Path: "/oauth2/callback"},
-			expectedIssuerURL: &url.URL{
-				Scheme: "https", Host: "myhost.com", Path: ""},
-			expectedError: nil,
-		},
-		{
-			name:        "invalid redirect URL",
-			redirectURL: "https://[fe80::1%en0]/oauth2/callback",
-			expectedError: errors.New("Invalid configuration:\n" +
-				"  error parsing redirect-url=\"https://[fe80::1%en0]/oauth2/callback\" " +
-				"parse https://[fe80::1%en0]/oauth2/callback: invalid URL escape \"%en\""),
-		},
-		{
-			name:      "invalid issuer URL",
-			issuerURL: "https://[fe80::1%en0]/oauth2/callback",
-			expectedError: errors.New("Invalid configuration:\n" +
-				"  error parsing issuer-url=\"https://[fe80::1%en0]/oauth2/callback\" " +
-				"parse https://[fe80::1%en0]/oauth2/callback: invalid URL escape \"%en\""),
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			o := testOptions()
-			if tc.issuerURL != "" {
-				o.IssuerURL = tc.issuerURL
-			} else {
-				o.RedirectURL = tc.redirectURL
-			}
-			err := o.Validate()
-			if tc.expectedError == nil {
-				testutil.Ok(t, err)
-				testutil.Equal(t, tc.expectedRedirectURL, o.redirectURL)
-				testutil.Equal(t, tc.expectedIssuerURL, o.issuerURL)
-			} else {
-				testutil.Equal(t, tc.expectedError, err)
-			}
-		})
-	}
+// Note that it's not worth testing nonparseable URLs, since url.Parse()
+// seems to parse damn near anything.
+func TestRedirectURL(t *testing.T) {
+	o := testOptions()
+	o.RedirectURL = "https://myhost.com/oauth2/callback"
+	testutil.Equal(t, nil, o.Validate())
+	expected := &url.URL{
+		Scheme: "https", Host: "myhost.com", Path: "/oauth2/callback"}
+	testutil.Equal(t, expected, o.redirectURL)
 }
 
 func TestCookieRefreshMustBeLessThanCookieExpire(t *testing.T) {

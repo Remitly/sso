@@ -69,7 +69,7 @@ services:
       - SSO_EMAIL_DOMAIN=*
 
       - HOST=sso-auth.localtest.me
-      - ISSUER_URL=http://sso-auth.localtest.me
+      - REDIRECT_URL=http://sso-auth.localtest.me
       - PROXY_ROOT_DOMAIN=localtest.me
 
       # These values must match sso-proxy's CLIENT_ID and CLIENT_SECRET values
