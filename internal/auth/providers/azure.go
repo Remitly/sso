@@ -135,7 +135,7 @@ func (p *AzureV2Provider) Redeem(redirectURL, code string) (*sessions.SessionSta
 		LifetimeDeadline: sessions.ExtendDeadline(p.SessionLifetimeTTL),
 
 		Email: claims.Email,
-		// User:  claims.PreferredUsername,
+		User:  claims.PreferredUsername,
 	}
 
 	if p.GraphService != nil {
