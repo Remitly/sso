@@ -180,7 +180,7 @@ func (p *Authenticator) newMux() http.Handler {
 	serviceMux.HandleFunc("/start", p.withMethods(p.OAuthStart, "GET"))
 	serviceMux.HandleFunc("/sign_in", p.withMethods(p.validateClientID(p.validateRedirectURI(p.validateSignature(p.SignIn))), "GET"))
 	serviceMux.HandleFunc("/sign_out", p.withMethods(p.validateRedirectURI(p.validateSignature(p.SignOut)), "GET", "POST"))
-	serviceMux.HandleFunc("/oauth2/callback", p.withMethods(p.OAuthCallback, "GET"))
+	serviceMux.HandleFunc("/oauth2/callback", p.withMethods(p.OAuthCallback, "GET", "POST"))
 	serviceMux.HandleFunc("/profile", p.withMethods(p.validateClientID(p.validateClientSecret(p.GetProfile)), "GET"))
 	serviceMux.HandleFunc("/validate", p.withMethods(p.validateClientID(p.validateClientSecret(p.ValidateToken)), "GET"))
 	serviceMux.HandleFunc("/redeem", p.withMethods(p.validateClientID(p.validateClientSecret(p.Redeem)), "POST"))
