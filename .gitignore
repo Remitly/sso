@@ -51,8 +51,9 @@ __pycache__/
 # C extensions
 *.so
 
-# Test binary, build with `go test -c`
+# Test binaries
 *.test
+sso-devproxy
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out

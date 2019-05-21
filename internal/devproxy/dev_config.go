@@ -55,16 +55,27 @@ type UpstreamConfig struct {
 	HeaderOverrides    map[string]string
 	TLSSkipVerify      bool
 	SkipRequestSigning bool
+	User               string
+	Groups             string
+	Email              string
 }
 
 // RouteConfig maps to the yaml config fields,
 // * "from" - the domain that will be used to access the service
 // * "to" -  the cname of the proxied service (this tells sso proxy where to proxy requests that come in on the from field)
 type RouteConfig struct {
-	From    string         `yaml:"from"`
-	To      string         `yaml:"to"`
-	Type    string         `yaml:"type"`
-	Options *OptionsConfig `yaml:"options"`
+	From     string         `yaml:"from"`
+	To       string         `yaml:"to"`
+	Type     string         `yaml:"type"`
+	Options  *OptionsConfig `yaml:"options"`
+	UserInfo *UserInfo      `yaml:"user_info"`
+}
+
+//UserInfo is going to be injected into the header
+type UserInfo struct {
+	User   string `yaml:"user"`
+	Groups string `yaml:"groups"`
+	Email  string `yaml:"email"`
 }
 
 // OptionsConfig maps to the yaml config fields:
@@ -174,6 +185,10 @@ func loadServiceConfigs(raw []byte, cluster, scheme string, configVars map[strin
 	// We validate OptionsConfig
 	for _, proxy := range configs {
 		err := parseOptionsConfig(proxy)
+		if err != nil {
+			return nil, err
+		}
+		err = parseUserInfoConfig(proxy)
 		if err != nil {
 			return nil, err
 		}
@@ -349,6 +364,18 @@ func parseOptionsConfig(proxy *UpstreamConfig) error {
 	proxy.HeaderOverrides = proxy.RouteConfig.Options.HeaderOverrides
 	proxy.SkipRequestSigning = proxy.RouteConfig.Options.SkipRequestSigning
 	proxy.RouteConfig.Options = nil
+
+	return nil
+}
+
+func parseUserInfoConfig(proxy *UpstreamConfig) error {
+	if proxy.RouteConfig.UserInfo == nil {
+		return nil
+	}
+
+	proxy.User = proxy.RouteConfig.UserInfo.User
+	proxy.Groups = proxy.RouteConfig.UserInfo.Groups
+	proxy.Email = proxy.RouteConfig.UserInfo.Email
 
 	return nil
 }

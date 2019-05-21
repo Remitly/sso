@@ -23,23 +23,30 @@ const HMACSignatureHeader = "Gap-Signature"
 
 // SignatureHeaders are the headers that are valid in the request.
 var SignatureHeaders = []string{
+	"Content-Length",
+	"Content-Md5",
+	"Content-Type",
+	"Date",
+	"Authorization",
 	"X-Forwarded-User",
 	"X-Forwarded-Email",
 	"X-Forwarded-Groups",
-	"X-Forwarded-Access-Token",
+	"Cookie",
 }
 
 const statusInvalidHost = 421
 
 // DevProxy stores all the information associated with proxying the request.
 type DevProxy struct {
-	// redirectURL       *url.URL // the url to receive requests at
 	skipAuthPreflight bool
 	templates         *template.Template
 	mux               map[string]*route
 	regexRoutes       []*route
 	requestSigner     *RequestSigner
 	publicCertsJSON   []byte
+	user              string
+	groups            string
+	email             string
 }
 
 type route struct {
@@ -61,6 +68,7 @@ type StateParameter struct {
 type UpstreamProxy struct {
 	name          string
 	handler       http.Handler
+	auth          hmacauth.HmacAuth
 	requestSigner *RequestSigner
 }
 
@@ -104,9 +112,10 @@ func newUpstreamTransport(insecureSkipVerify bool) *upstreamTransport {
 
 // ServeHTTP calls the upstream's ServeHTTP function.
 func (u *UpstreamProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-
+	if u.auth != nil {
+		u.auth.SignRequest(r)
+	}
 	if u.requestSigner != nil {
-
 		u.requestSigner.Sign(r)
 	}
 
@@ -157,6 +166,7 @@ func NewReverseProxy(to *url.URL, config *UpstreamConfig) *httputil.ReverseProxy
 		dir(req)
 		req.Host = to.Host
 	}
+
 	return proxy
 }
 
@@ -194,6 +204,7 @@ func NewReverseProxyHandler(reverseProxy *httputil.ReverseProxy, opts *Options, 
 	upstreamProxy := &UpstreamProxy{
 		name:          config.Service,
 		handler:       reverseProxy,
+		auth:          config.HMACAuth,
 		requestSigner: signer,
 	}
 
@@ -274,10 +285,8 @@ func NewDevProxy(opts *Options, optFuncs ...func(*DevProxy) error) (*DevProxy, e
 
 	p := &DevProxy{
 		// these fields make up the routing mechanism
-		mux:         make(map[string]*route),
-		regexRoutes: make([]*route, 0),
-
-		// redirectURL:     &url.URL{Path: "/oauth2/callback"},
+		mux:             make(map[string]*route),
+		regexRoutes:     make([]*route, 0),
 		templates:       getTemplates(),
 		requestSigner:   requestSigner,
 		publicCertsJSON: certsAsStr,
@@ -289,8 +298,10 @@ func NewDevProxy(opts *Options, optFuncs ...func(*DevProxy) error) (*DevProxy, e
 			return nil, err
 		}
 	}
-
 	for _, upstreamConfig := range opts.upstreamConfigs {
+		p.user = upstreamConfig.User
+		p.email = upstreamConfig.Email
+		p.groups = upstreamConfig.Groups
 		switch route := upstreamConfig.Route.(type) {
 		case *SimpleRoute:
 			reverseProxy := NewReverseProxy(route.ToURL, upstreamConfig)
@@ -419,6 +430,7 @@ func (p *DevProxy) UnknownHost(rw http.ResponseWriter, req *http.Request) {
 
 // Handle constructs a route from the given host string and matches it to the provided http.Handler and UpstreamConfig
 func (p *DevProxy) Handle(host string, handler http.Handler, tags []string, upstreamConfig *UpstreamConfig) {
+
 	tags = append(tags, "route:simple")
 	p.mux[host] = &route{handler: handler, upstreamConfig: upstreamConfig, tags: tags}
 }
@@ -430,9 +442,9 @@ func (p *DevProxy) HandleRegex(regex *regexp.Regexp, handler http.Handler, tags 
 }
 
 func (p *DevProxy) setProxyHeaders(rw http.ResponseWriter, req *http.Request) (err error) {
-	req.Header.Set("X-Forwarded-User", req.Header.Get("User"))
-	req.Header.Set("X-Forwarded-Email", req.Header.Get("Email"))
-	req.Header.Set("X-Forwarded-Groups", req.Header.Get("groups"))
+	req.Header.Set("X-Forwarded-User", p.user)
+	req.Header.Set("X-Forwarded-Email", p.email)
+	req.Header.Set("X-Forwarded-Groups", p.groups)
 	// req.Header.set("X-Forwarded-Access-Token", "")
 	return nil
 }

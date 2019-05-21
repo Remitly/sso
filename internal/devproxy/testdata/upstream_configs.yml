@@ -1,8 +1,11 @@
-- service: dev-shim
+- service: devshim
   default:
     from: http://localhost:4888
     to: http://localhost:4810
     options:
         skip_request_signing: false
-
+    user_info:
+        user: testUser
+        groups: team
+        email: testtest@remitly.com
 

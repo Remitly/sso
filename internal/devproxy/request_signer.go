@@ -27,6 +27,7 @@ var signedHeaders = []string{
 	"X-Forwarded-User",
 	"X-Forwarded-Email",
 	"X-Forwarded-Groups",
+	"Cookie",
 }
 
 // Name of the header used to transmit the signature computed for the request.

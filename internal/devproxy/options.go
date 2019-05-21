@@ -18,26 +18,17 @@ import (
 // TCPWriteTimeout - http server tcp write timeout
 // TCPReadTimeout - http server tcp read timeout
 type Options struct {
-	Port int `envconfig:"PORT" default:"4180"`
-
-	UpstreamConfigsFile string `envconfig:"UPSTREAM_CONFIGS"`
-	Cluster             string `envconfig:"CLUSTER"`
-	Scheme              string `envconfig:"SCHEME" default:"https"`
-
-	Host string `envconfig:"HOST"`
-
+	Port                   int           `envconfig:"PORT" default:"4180"`
+	UpstreamConfigsFile    string        `envconfig:"UPSTREAM_CONFIGS"`
+	Scheme                 string        `envconfig:"SCHEME" default:"https"`
+	Host                   string        `envconfig:"HOST"`
 	DefaultUpstreamTimeout time.Duration `envconfig:"DEFAULT_UPSTREAM_TIMEOUT" default:"10s"`
-
-	TCPWriteTimeout time.Duration `envconfig:"TCP_WRITE_TIMEOUT" default:"30s"`
-	TCPReadTimeout  time.Duration `envconfig:"TCP_READ_TIMEOUT" default:"30s"`
-
-	RequestLogging bool `envconfig:"REQUEST_LOGGING" default:"true"`
-
-	RequestSigningKey string `envconfig:"REQUEST_SIGNATURE_KEY"`
-
+	TCPWriteTimeout        time.Duration `envconfig:"TCP_WRITE_TIMEOUT" default:"30s"`
+	TCPReadTimeout         time.Duration `envconfig:"TCP_READ_TIMEOUT" default:"30s"`
+	RequestLogging         bool          `envconfig:"REQUEST_LOGGING" default:"true"`
+	RequestSigningKey      string        `envconfig:"REQUEST_SIGNATURE_KEY"`
 	// This is an override for supplying template vars at test time
 	testTemplateVars map[string]string
-
 	// internal values that are set after config validation
 	upstreamConfigs []*UpstreamConfig
 }
@@ -62,11 +53,10 @@ func parseURL(toParse string, urltype string, msgs []string) (*url.URL, []string
 // Validate validates options
 func (o *Options) Validate() error {
 	msgs := make([]string, 0)
-	if o.Cluster == "" {
-		msgs = append(msgs, "missing setting: cluster")
-	}
+
 	if o.UpstreamConfigsFile == "" {
 		msgs = append(msgs, "missing setting: upstream-configs")
+		o.UpstreamConfigsFile = "internal/devproxy/testdata/upstream_configs.yml"
 	}
 
 	if o.UpstreamConfigsFile != "" {
@@ -80,7 +70,7 @@ func (o *Options) Validate() error {
 			templateVars = o.testTemplateVars
 		}
 
-		o.upstreamConfigs, err = loadServiceConfigs(rawBytes, o.Cluster, o.Scheme, templateVars)
+		o.upstreamConfigs, err = loadServiceConfigs(rawBytes, "default", o.Scheme, templateVars)
 		if err != nil {
 			msgs = append(msgs, fmt.Sprintf("error parsing upstream configs file %s", err))
 		}
