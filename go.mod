@@ -6,6 +6,7 @@ require (
 	github.com/bmizerany/assert v0.0.0-20160611221934-b7ed37b82869 // indirect
 	github.com/coreos/go-oidc v2.0.0+incompatible
 	github.com/datadog/datadog-go v0.0.0-20180822151419-281ae9f2d895
+	github.com/go-redis/redis v6.15.2+incompatible
 	github.com/hashicorp/golang-lru v0.5.1
 	github.com/imdario/mergo v0.3.7
 	github.com/kelseyhightower/envconfig v1.3.0
