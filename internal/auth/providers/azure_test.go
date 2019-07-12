@@ -139,7 +139,7 @@ func TestAzureV2ProviderDefaults(t *testing.T) {
 	for _, expected := range expectedResults {
 		t.Run(expected.name, func(t *testing.T) {
 			p := newAzureV2Provider(expected.providerData)
-			err := p.Configure(microsoftTenantID)
+			err := p.Configure(microsoftTenantID, "consent")
 			if err != nil {
 				t.Error(err)
 			}
@@ -350,7 +350,7 @@ func TestAzureV2ProviderRedeem(t *testing.T) {
 			azureOIDCConfigURLTemplate = providerURL.String()
 
 			p := newAzureV2Provider(nil)
-			err = p.Configure(microsoftTenantID)
+			err = p.Configure(microsoftTenantID, "consent")
 			if err != nil {
 				t.Error(err)
 			}

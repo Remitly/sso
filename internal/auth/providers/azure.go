@@ -32,7 +32,8 @@ type AzureV2Provider struct {
 	*ProviderData
 	*OIDCProvider
 
-	Tenant string
+	Tenant         string
+	ApprovalPrompt string
 
 	StatsdClient *statsd.Client
 	NonceCipher  aead.Cipher
@@ -57,9 +58,10 @@ func NewAzureV2Provider(p *ProviderData) (*AzureV2Provider, error) {
 	}
 
 	return &AzureV2Provider{
-		ProviderData: p,
-		NonceCipher:  nonceCipher,
-		OIDCProvider: nil,
+		ProviderData:   p,
+		ApprovalPrompt: "consent",
+		NonceCipher:    nonceCipher,
+		OIDCProvider:   nil,
 	}, nil
 }
 
@@ -149,7 +151,8 @@ func (p *AzureV2Provider) Redeem(redirectURL, code string) (*sessions.SessionSta
 }
 
 // Configure sets the Azure tenant ID value for the provider
-func (p *AzureV2Provider) Configure(tenant string) error {
+func (p *AzureV2Provider) Configure(tenant string, prompt string) error {
+	p.ApprovalPrompt = prompt
 	p.Tenant = tenant
 	if p.Tenant == "" {
 		// TODO: See below, "common" is the right default value, and while
@@ -242,7 +245,7 @@ func (p *AzureV2Provider) GetSignInURL(redirectURI, state string) string {
 	params.Set("response_mode", "form_post")
 	params.Add("scope", p.Scope)
 	params.Add("state", state)
-	params.Set("prompt", "FIXME")
+	params.Set("prompt", p.ApprovalPrompt)
 	params.Set("nonce", p.calculateNonce(state)) // required parameter
 	a.RawQuery = params.Encode()
 
