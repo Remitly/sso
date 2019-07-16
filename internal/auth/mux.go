@@ -44,8 +44,6 @@ func NewAuthenticatorMux(config Configuration, statsdClient *statsd.Client) (*Au
 			SetRedirectURL(config.ServerConfig, idpSlug),
 		}
 
-		fmt.Printf("sc:\n %+v\n", config.SessionConfig)
-
 		if config.SessionConfig.RedisConfig.Enabled() {
 			opts = append(opts, SetRedisStore(config.SessionConfig, idpSlug))
 		} else {
